@@ -15,6 +15,7 @@ from drift.providers.factory import make_provider
 from drift.pipeline.pipeline import run_pipeline
 from drift.storage import make_run_dir, save_run, load_runs, save_metrics
 from drift.metrics.text import compute_all
+from drift.tasks import resolve_task_prompts
 
 
 async def _run_baseline(config: dict, num_runs: int, output_dir: str) -> Path:
@@ -23,6 +24,8 @@ async def _run_baseline(config: dict, num_runs: int, output_dir: str) -> Path:
     provider = make_provider(exp)
     system = exp["system_prompt"]
     prompt = exp["user_prompt"]
+    if "input" in exp:
+        prompt = prompt.replace("{input}", exp["input"])
     run_dir = make_run_dir(output_dir, exp["name"])
 
     click.echo(f"Experiment: {exp['name']}")
@@ -66,7 +69,8 @@ async def _run_pipeline(config: dict, num_runs: int, output_dir: str) -> Path:
 
     for i in range(num_runs):
         click.echo(f"  Run {i + 1}/{num_runs}:")
-        step_results = await run_pipeline(steps, initial_input)
+        task_dir = (Path.cwd() / "tasks" / exp["task"]) if "task" in exp else None
+        step_results = await run_pipeline(steps, initial_input, task_dir=task_dir)
         result = {
             "run_index": i,
             "type": "pipeline",
@@ -92,6 +96,7 @@ def cli():
 def run(config_path: str, runs: int, output_dir: str):
     """Run an experiment from a YAML config."""
     config = yaml.safe_load(Path(config_path).read_text())
+    config = resolve_task_prompts(config, Path.cwd() / "tasks")
     exp_type = config["experiment"].get("type", "baseline")
     if exp_type == "pipeline":
         asyncio.run(_run_pipeline(config, runs, output_dir))
