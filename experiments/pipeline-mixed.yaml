@@ -1,0 +1,68 @@
+experiment:
+  name: pipeline-mixed
+  type: pipeline
+
+  input: |
+    ```python
+    def process_users(db, user_ids):
+        results = []
+        for uid in user_ids:
+            query = f"SELECT * FROM users WHERE id = {uid}"
+            row = db.execute(query).fetchone()
+            if row:
+                user = {"id": row[0], "name": row[1], "email": row[2]}
+                user["password"] = row[3]
+                results.append(user)
+        return results
+    ```
+
+  steps:
+    - name: reviewer
+      provider: vertex
+      model: claude-sonnet-4-6
+      temperature: 0
+      system_prompt: |
+        You are an expert code reviewer. Review the provided code for bugs,
+        security issues, performance problems, and style concerns. Be specific
+        and concise. List each issue with its line number and a brief explanation.
+      user_prompt: |
+        Review this Python function:
+
+        {input}
+
+    - name: implementer
+      provider: ollama
+      model: qwen2.5:32b
+      temperature: 0
+      system_prompt: |
+        You are a senior Python developer. You will receive a code review
+        and the original code it refers to. Implement all the fixes recommended
+        in the review. Return only the corrected Python function with brief
+        inline comments explaining each change.
+      user_prompt: |
+        Original code:
+
+        {input}
+
+        Code review:
+
+        {previous_output}
+
+    - name: verifier
+      provider: ollama
+      model: qwen2.5:32b
+      temperature: 0
+      system_prompt: |
+        You are a code quality verifier. You will receive an original function
+        and a revised version. Verify that all issues from the original are
+        fixed, the implementation is correct and secure, and no new issues
+        were introduced. List any remaining issues or confirm the code is
+        production-ready. Be specific and concise.
+      user_prompt: |
+        Original code:
+
+        {input}
+
+        Revised code:
+
+        {previous_output}
