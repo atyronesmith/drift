@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import click
 
 from drift.providers.factory import make_provider
+from drift.pipeline.transforms import run_post_process
 
 
 @dataclass
@@ -31,7 +33,7 @@ class _SafeDict(dict):
         return "{" + key + "}"
 
 
-async def run_pipeline(steps_config: list[dict], initial_input: str) -> list[StepResult]:
+async def run_pipeline(steps_config: list[dict], initial_input: str, task_dir: Path | None = None) -> list[StepResult]:
     """Execute a pipeline of steps, chaining outputs via prompt templates."""
     results = []
     context = {"input": initial_input}
@@ -53,9 +55,16 @@ async def run_pipeline(steps_config: list[dict], initial_input: str) -> list[Ste
 
         results.append(StepResult(name=name, response=response.to_dict()))
 
+        # Apply post-processing if configured
+        response_content = response.content
+        if "post_process" in step:
+            response_content = run_post_process(
+                step["post_process"], response_content, context, task_dir
+            )
+
         # Update context for subsequent steps
-        context["previous_output"] = response.content
-        context[f"step_{i}"] = response.content
-        context[f"step_{name}"] = response.content
+        context["previous_output"] = response_content
+        context[f"step_{i}"] = response_content
+        context[f"step_{name}"] = response_content
 
     return results
