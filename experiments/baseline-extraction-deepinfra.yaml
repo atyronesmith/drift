@@ -1,0 +1,9 @@
+experiment:
+  name: baseline-extraction-deepinfra
+  provider: deepinfra
+  model: Qwen/Qwen2.5-72B-Instruct
+  temperature: 0
+  task: data_extraction
+
+  system_prompt_file: extractor_system.md
+  user_prompt_file: extractor_user.md
