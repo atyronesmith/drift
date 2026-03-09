@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from drift.providers.ollama import OllamaProvider
 from drift.providers.vertex import VertexProvider
+from drift.providers.deepinfra import DeepInfraProvider
 
 
 def make_provider(config: dict):
@@ -14,6 +15,11 @@ def make_provider(config: dict):
             model=model,
             project_id=config.get("project_id"),
             region=config.get("region"),
+        )
+    elif provider_name == "deepinfra":
+        return DeepInfraProvider(
+            model=model,
+            api_key=config.get("api_key"),
         )
     else:
         return OllamaProvider(model=model, base_url=config.get("base_url"))
