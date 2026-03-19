@@ -29,6 +29,10 @@ def resolve_task_prompts(config: dict, tasks_dir: Path) -> dict:
     # Resolve step-level prompt file refs (pipelines)
     for step in exp.get("steps", []):
         _resolve_prompt_fields(step, task_dir)
+        # Handle loop steps with nested inner steps
+        if step.get("type") == "loop":
+            for inner_step in step.get("steps", []):
+                _resolve_prompt_fields(inner_step, task_dir)
 
     return config
 
