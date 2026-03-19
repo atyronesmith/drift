@@ -34,7 +34,7 @@ class OllamaProvider:
 
         start = time.perf_counter()
         result = subprocess.run(
-            ["curl", "-s", "-f", "-X", "POST", url,
+            ["curl", "-s", "-X", "POST", url,
              "-H", "Content-Type: application/json",
              "-d", json.dumps(payload)],
             capture_output=True, text=True, timeout=600,
@@ -44,6 +44,8 @@ class OllamaProvider:
         elapsed_ms = (time.perf_counter() - start) * 1000
 
         data = json.loads(result.stdout)
+        if "error" in data:
+            raise RuntimeError(f"Ollama API error: {result.stdout}")
         usage = data.get("usage", {})
 
         return LLMResponse(
