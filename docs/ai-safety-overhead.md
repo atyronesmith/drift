@@ -198,19 +198,32 @@ No published data quantifies this as a per-inference metric (e.g., person-hours 
 
 ### What's missing: the ratio
 
-A rough framework for comparing safety cost to breach cost:
+A rough framework for comparing safety cost to damage risk:
 
 - If an enterprise runs 1M inference calls/month and safety adds ~0.7s of GPU time per call, that's ~194 GPU-hours/month of safety compute.
 - At $3/GPU-hour (H100 cloud), that's ~$583/month in safety compute.
 - Against a $2.1M average breach cost reduction, the ROI is clear at this scale.
 
-However, this calculation only accounts for latency-based overhead. It excludes:
-- GPU memory consumed by co-located safety models
-- The cost of rejected outputs and retries (the LlamaFirewall utility gap)
-- Human operational costs (guardrail tuning, false positive investigation, monitoring)
-- The throughput reduction from deterministic inference and constrained decoding
+**Break-even framing**: At $583/month for 1M calls, safety compute is negligible relative to breach risk. But this assumes the latency-only cost model. If we include the full safety tax — utility loss (57% rejection → retries doubling effective calls), human ops (~0.5 FTE at $135K/year = ~$5,600/month), and throughput reduction (34% for deterministic inference) — the monthly cost looks different:
 
-The actual safety tax likely exceeds the latency-only estimate, but by how much remains unmeasured.
+| Component | Monthly cost estimate |
+|-----------|---------------------|
+| Safety compute (latency) | ~$583 |
+| Retry overhead (2.3x calls at 57% rejection) | ~$753 |
+| Deterministic inference throughput loss (34%) | ~$1,836 |
+| Human ops (0.5 FTE) | ~$5,600 |
+| **Total estimated safety cost** | **~$8,772/month** |
+
+At ~$105K/year, the break-even against a single $2.1M breach cost reduction is ~20 years — the ROI still heavily favors safety investment. But at higher call volumes (100M calls/month, common for large enterprises), the compute and retry components scale to ~$134K/month while breach risk does not scale proportionally, narrowing the margin. And if operational damage from agent errors (database restorations, rollbacks) averages even one $50K incident per month, the cost-of-not-having-safety rises substantially.
+
+These figures are illustrative and combine vendor benchmark data, published cost estimates, and assumptions. They are included to show the structure of the calculation, not to assert precise costs. The point is that the break-even depends heavily on which cost components are included — latency-only analysis understates the safety tax by an order of magnitude.
+
+The break-even table above attempts to include these broader costs, but each line item carries uncertainty. Unmeasured factors that could shift the calculation further:
+- GPU memory consumed by co-located safety models (reduces capacity for productive inference)
+- Compound false-positive rates from stacked guardrails (potentially higher retry costs)
+- Capability tax (reduced task success rate requiring human intervention)
+
+Empirical measurement of these components — not just the latency line — is what would make the cost-benefit analysis actionable.
 
 ### The market context
 
@@ -266,11 +279,19 @@ The following questions do not have published answers as of March 2026:
 
 6. **Constrained decoding vs. post-hoc guardrails**: These are fundamentally different approaches — prevention at generation time vs. detection after generation. Constrained decoding has a per-token cost but zero false rejections for structural violations. Post-hoc guardrails have a per-output cost with nonzero false rejection rates. No study has compared their compute efficiency for equivalent safety outcomes.
 
-7. **Self-hosted vs. cloud + guardrails total cost of ownership**: Drift's data shows self-hosted Ollama produces 100% deterministic output at temp=0 with no guardrail overhead. But self-hosting has its own costs: hardware ($20K–$200K+ for GPU servers), operations staff (~$135K/year for MLOps engineers), power, cooling, and compliance infrastructure. No published comparison weighs the total cost of self-hosted deterministic inference against cloud inference plus the guardrails needed to compensate for cloud non-determinism. A related question: do managed API providers (OpenAI, Anthropic, DeepInfra) apply their own opaque guardrails that add latency and bias outputs in ways the customer cannot measure or control?
+7. **Self-hosted vs. cloud + guardrails total cost of ownership**: Drift's data shows self-hosted Ollama produces 100% deterministic output at temp=0 with no guardrail overhead. But self-hosting has its own costs: hardware ($20K–$200K+ for GPU servers), operations staff (~$135K/year for MLOps engineers), power, cooling, and compliance infrastructure. No published comparison weighs the total cost of self-hosted deterministic inference against cloud inference plus the guardrails needed to compensate for cloud non-determinism.
+
+    A compounding factor: managed API providers (OpenAI, Anthropic, DeepInfra) apply their own guardrails that customers cannot measure, disable, or control. These provider-side guardrails add latency that appears as model inference time, reject outputs that the customer's own guardrails would have accepted, and may bias outputs in ways that are invisible to downstream measurement. When an enterprise adds NeMo Guardrails on top of a provider that already runs its own content filters, the customer is paying for two safety stacks — one visible, one opaque — with no way to measure redundancy or interaction effects. Any cost-benefit analysis of self-hosted vs. cloud must account for this: the cloud safety tax includes not just the customer's guardrails but the provider's as well, and the provider's contribution to latency, utility loss, and output bias is unmeasurable from outside.
 
 8. **Safety-induced capability degradation**: Do safety layers make agents worse at their jobs, beyond just blocking outputs? If guardrails bias the output distribution toward "safer" but less useful responses (more verbose, more hedging, avoiding edge cases), the effective cost includes reduced task success rate — not just latency and rejection. This "capability tax" is distinct from the compute tax and may be harder to detect.
 
-9. **Cost of agent-caused operational damage**: The $10.22M breach cost figure captures adversarial incidents. What is the equivalent figure for self-inflicted damage from agent errors — database restorations, rollbacks, bad deployments, data corruption? This data likely exists in enterprise incident management systems but is not published or attributed to AI safety failures. Without it, the SROI of guardrails against operational damage cannot be calculated.
+9. **Cost of agent-caused operational damage**: The $10.22M breach cost figure captures adversarial incidents. What is the equivalent figure for self-inflicted damage from agent errors — database restorations, rollbacks, bad deployments, data corruption? This data is not published or attributed to AI safety failures, but it is not invisible. Enterprises can approximate it from existing systems:
+    - **Incident postmortems**: organizations using blameless postmortem processes (e.g., PagerDuty, Jeli) can tag incidents caused by automated/AI systems and extract cost-per-incident estimates.
+    - **Change management records**: ITSM platforms (ServiceNow, Jira Service Management) track change failures and rollbacks. Filtering for AI-initiated changes would yield a failure rate and mean-time-to-recovery.
+    - **Database restoration costs**: backup/restore frequency, RTO (recovery time objective), and the labor cost of data reconciliation after a bad write are measurable from existing infrastructure metrics.
+    - **Industry benchmarks**: Gartner and Forrester publish cost-per-incident figures for IT operations ($5K–$50K for minor incidents, $100K+ for major outages). Applying these to agent-initiated incident rates would give a rough operational damage estimate.
+
+    Without this data, the SROI of guardrails against operational damage cannot be calculated. But the data sources exist — they just have not been aggregated for AI agent deployments specifically.
 
 10. **LLM-based vs. permission-based safety cost comparison**: For preventing operational damage (destructive tool use), how does the cost of an LLM safety judge (which must infer intent from output content) compare to a database permission check or RBAC rule (which deterministically blocks the operation)? The permission-based approach has zero false negatives and zero inference cost, but is less flexible. No study has measured where LLM-based guards add value beyond what access controls already provide.
 
@@ -318,6 +339,15 @@ Drift can compare output distributions with and without safety layers to detect 
 - Output consistency across runs (does adding safety reduce or increase drift?)
 
 A system with 90% safety rate but 40% task success is worse than one with 70% safety and 75% task success — but no tool currently measures both dimensions simultaneously.
+
+**Integration feasibility**: The safety tools vary in how easily they can be plugged into drift's pipeline:
+- **Llama Guard**: Available as a standard model on Ollama and HuggingFace. Can be integrated as a post-step check in drift's pipeline executor — call the model with the output text, parse the safe/unsafe classification. Low integration effort.
+- **PromptGuard 2**: A small BERT classifier (~86M params). Available on HuggingFace. Can run locally with minimal GPU overhead. Straightforward to wrap as a pre-step input check. Low integration effort.
+- **CodeShield**: Open-source static analysis tool. Runs as a subprocess on generated code — no GPU needed. Can be added to drift's `post_process` step mechanism. Low integration effort.
+- **NeMo Guardrails**: Requires the NeMo Guardrails runtime and configuration. More complex integration — the framework expects to orchestrate the entire LLM call, not just evaluate an output. Would require wrapping drift's provider calls inside NeMo's execution model. Medium-high integration effort.
+- **Full LlamaFirewall stack**: Combines PromptGuard 2 + AlignmentCheck + CodeShield. Available as a Python package (`llamafirewall`). AlignmentCheck requires chain-of-thought auditing, which is the most compute-intensive component. Medium integration effort — the package provides a unified API, but AlignmentCheck adds significant latency per check.
+
+The lowest-effort experiment would compare (a) no guardrails vs. (b) Llama Guard output check vs. (c) Llama Guard + CodeShield — all of which can be integrated as post-step hooks in drift's existing pipeline executor without architectural changes.
 
 ### 4. Loop-Aware Overhead Measurement
 
