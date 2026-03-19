@@ -12,9 +12,10 @@ load_dotenv()
 import yaml
 
 from drift.providers.factory import make_provider
-from drift.pipeline.pipeline import run_pipeline
+from drift.pipeline.pipeline import run_pipeline, StepResult, LoopStepResult
 from drift.storage import make_run_dir, save_run, load_runs, save_metrics
 from drift.metrics.text import compute_all
+from drift.metrics.iteration import compute_iteration_metrics
 from drift.tasks import resolve_task_prompts
 
 
@@ -58,11 +59,16 @@ async def _run_pipeline(config: dict, num_runs: int, output_dir: str) -> Path:
     initial_input = exp["input"]
     run_dir = make_run_dir(output_dir, exp["name"])
 
-    step_models = [f"{s.get('provider','ollama')}:{s['model']}" for s in steps]
+    step_labels = []
+    for s in steps:
+        if s.get("type") == "loop":
+            step_labels.append(f"loop:{s.get('name', 'loop')}")
+        else:
+            step_labels.append(f"{s.get('provider','ollama')}:{s['model']}")
 
     click.echo(f"Experiment: {exp['name']}")
     click.echo(f"Type: pipeline ({len(steps)} steps)")
-    click.echo(f"Models: {' → '.join(step_models)}")
+    click.echo(f"Models: {' → '.join(step_labels)}")
     click.echo(f"Runs: {num_runs}")
     click.echo(f"Output: {run_dir}")
     click.echo()
@@ -74,7 +80,7 @@ async def _run_pipeline(config: dict, num_runs: int, output_dir: str) -> Path:
         result = {
             "run_index": i,
             "type": "pipeline",
-            "steps": [{"name": sr.name, "response": sr.response} for sr in step_results],
+            "steps": _serialize_results(step_results),
             "config": exp,
         }
         save_run(run_dir, i, result)
@@ -128,6 +134,26 @@ def measure(results_dir: str, output: str | None):
         click.echo(json.dumps(metrics, indent=2))
 
 
+def _serialize_results(step_results: list) -> list[dict]:
+    """Serialize a mix of StepResult and LoopStepResult to dicts."""
+    out = []
+    for sr in step_results:
+        if isinstance(sr, LoopStepResult):
+            out.append({
+                "name": sr.name,
+                "type": "loop",
+                "total_iterations": sr.total_iterations,
+                "termination_reason": sr.termination_reason,
+                "iterations": [
+                    [{"name": s.name, "response": s.response} for s in iteration]
+                    for iteration in sr.iterations
+                ],
+            })
+        else:
+            out.append({"name": sr.name, "response": sr.response})
+    return out
+
+
 def _measure_baseline(runs: list[dict]) -> dict:
     outputs = [r["response"]["content"] for r in runs]
     metrics = compute_all(outputs)
@@ -142,34 +168,57 @@ def _measure_baseline(runs: list[dict]) -> dict:
 def _measure_pipeline(runs: list[dict]) -> dict:
     num_steps = len(runs[0]["steps"])
     step_names = [s["name"] for s in runs[0]["steps"]]
+    has_loops = any(s.get("type") == "loop" for s in runs[0]["steps"])
 
     per_step = []
     for step_idx in range(num_steps):
-        outputs = [r["steps"][step_idx]["response"]["content"] for r in runs]
-        step_metrics = compute_all(outputs)
-        step_metrics["name"] = step_names[step_idx]
-        step_metrics["model"] = runs[0]["steps"][step_idx]["response"]["model"]
-        step_metrics["provider"] = runs[0]["steps"][step_idx]["response"]["provider"]
-        timing = [r["steps"][step_idx]["response"]["total_ms"] for r in runs]
-        step_metrics["mean_latency_ms"] = round(sum(timing) / len(timing), 1)
-        per_step.append(step_metrics)
+        step_data = runs[0]["steps"][step_idx]
 
-    # Final step = overall pipeline output
-    final_outputs = [r["steps"][-1]["response"]["content"] for r in runs]
+        if step_data.get("type") == "loop":
+            loop_metrics = compute_iteration_metrics(runs, step_idx)
+            loop_metrics["name"] = step_data["name"]
+            loop_metrics["type"] = "loop"
+            per_step.append(loop_metrics)
+        else:
+            outputs = [r["steps"][step_idx]["response"]["content"] for r in runs]
+            step_metrics = compute_all(outputs)
+            step_metrics["name"] = step_names[step_idx]
+            step_metrics["model"] = runs[0]["steps"][step_idx]["response"]["model"]
+            step_metrics["provider"] = runs[0]["steps"][step_idx]["response"]["provider"]
+            timing = [r["steps"][step_idx]["response"]["total_ms"] for r in runs]
+            step_metrics["mean_latency_ms"] = round(sum(timing) / len(timing), 1)
+            per_step.append(step_metrics)
+
+    # Final pipeline output — last step or last iteration of last loop
+    final_outputs = _get_final_outputs(runs)
     final_metrics = compute_all(final_outputs)
 
-    return {
+    result = {
         "type": "pipeline",
         "num_steps": num_steps,
         "num_runs": len(runs),
         "per_step": per_step,
         "final": final_metrics,
         "drift_curve": {
-            "exact_match_rate": [s["exact_match_rate"] for s in per_step],
-            "mean_edit_distance": [s["mean_edit_distance"] for s in per_step],
-            "num_unique": [s["num_unique"] for s in per_step],
+            "exact_match_rate": [s["exact_match_rate"] for s in per_step if "exact_match_rate" in s],
+            "mean_edit_distance": [s["mean_edit_distance"] for s in per_step if "mean_edit_distance" in s],
+            "num_unique": [s["num_unique"] for s in per_step if "num_unique" in s],
         },
     }
+    return result
+
+
+def _get_final_outputs(runs: list[dict]) -> list[str]:
+    """Extract the final output from each run, handling loop steps."""
+    outputs = []
+    for r in runs:
+        last_step = r["steps"][-1]
+        if last_step.get("type") == "loop":
+            last_iter = last_step["iterations"][-1]
+            outputs.append(last_iter[-1]["response"]["content"])
+        else:
+            outputs.append(last_step["response"]["content"])
+    return outputs
 
 
 if __name__ == "__main__":
