@@ -206,17 +206,33 @@ A rough framework for comparing safety cost to damage risk:
 
 **Break-even framing**: At $583/month for 1M calls, safety compute is negligible relative to breach risk. But this assumes the latency-only cost model. If we include the full safety tax — utility loss (57% rejection → retries doubling effective calls), human ops (~0.5 FTE at $135K/year = ~$5,600/month), and throughput reduction (34% for deterministic inference) — the monthly cost looks different:
 
-| Component | Monthly cost estimate |
-|-----------|---------------------|
-| Safety compute (latency) | ~$583 |
-| Retry overhead (2.3x calls at 57% rejection) | ~$753 |
-| Deterministic inference throughput loss (34%) | ~$1,836 |
-| Human ops (0.5 FTE) | ~$5,600 |
-| **Total estimated safety cost** | **~$8,772/month** |
+| Component | Monthly cost estimate | Confidence |
+|-----------|---------------------|------------|
+| Safety compute (latency) | ~$583 | Vendor-reported (NeMo, Llama Guard benchmarks) |
+| Retry overhead (2.3x calls at 57% rejection) | ~$753 | Estimated — derived from LlamaFirewall benchmark, see sensitivity analysis below |
+| Deterministic inference throughput loss (34%) | ~$1,836 | Vendor-reported (SGLang documentation) |
+| Human ops (0.5 FTE) | ~$5,600 | Estimated — no published per-inference data exists |
+| **Total estimated safety cost** | **~$8,772/month** | **Mixed — see confidence column** |
 
 At ~$105K/year, the break-even against a single $2.1M breach cost reduction is ~20 years — the ROI still heavily favors safety investment. But at higher call volumes (100M calls/month, common for large enterprises), the compute and retry components scale to ~$134K/month while breach risk does not scale proportionally, narrowing the margin. And if operational damage from agent errors (database restorations, rollbacks) averages even one $50K incident per month, the cost-of-not-having-safety rises substantially.
 
 These figures are illustrative and combine vendor benchmark data, published cost estimates, and assumptions. They are included to show the structure of the calculation, not to assert precise costs. The point is that the break-even depends heavily on which cost components are included — latency-only analysis understates the safety tax by an order of magnitude.
+
+#### Sensitivity to rejection rate
+
+The 57.3% rejection rate (42.7% utility) from the LlamaFirewall benchmark is the most influential variable in the cost model. It drives the retry overhead directly and compounds in agentic workflows. The table below shows how the economics shift at different rejection rates:
+
+| Rejection rate | Retries per useful output | Retry cost (1M calls) | Total safety cost/month | Break-even vs. $2.1M |
+|---------------|--------------------------|----------------------|------------------------|----------------------|
+| 15% | 1.18x | ~$104 | ~$8,123 | ~21 years |
+| 30% | 1.43x | ~$250 | ~$8,269 | ~20 years |
+| 57% (LlamaFirewall) | 2.33x | ~$753 | ~$8,772 | ~20 years |
+| 70% | 3.33x | ~$1,360 | ~$9,379 | ~19 years |
+| 80% | 5.00x | ~$2,332 | ~$10,351 | ~18 years |
+
+At 1M calls/month, the rejection rate barely moves the needle — human ops dominates the cost. At 100M calls/month (where human ops is amortized), the picture changes: a 15% rejection rate adds ~$10K/month in retries while 57% adds ~$75K and 80% adds ~$233K. The retry death spiral becomes the dominant cost above ~40% rejection.
+
+No published source reports production rejection rates outside of benchmark conditions. The 57% figure may be a worst case (LlamaFirewall with all three layers active against adversarial inputs) or a best case (production workloads may trigger different false-positive patterns). Empirical measurement of rejection rates on real workloads is the single highest-value data point missing from the cost model.
 
 The break-even table above attempts to include these broader costs, but each line item carries uncertainty. Unmeasured factors that could shift the calculation further:
 - GPU memory consumed by co-located safety models (reduces capacity for productive inference)
