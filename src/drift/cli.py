@@ -18,6 +18,7 @@ from drift.metrics.text import compute_all
 from drift.metrics.iteration import compute_iteration_metrics
 from drift.metrics.functional import compute_functional_metrics
 from drift.tasks import resolve_task_prompts
+from drift.analysis import analyze_metrics, format_report
 
 
 async def _run_baseline(config: dict, num_runs: int, output_dir: str) -> Path:
@@ -157,6 +158,19 @@ def measure(results_dir: str, output: str | None, functional_step: str | None,
         click.echo(f"Metrics saved to {output}")
     else:
         click.echo(json.dumps(metrics, indent=2))
+
+
+@cli.command()
+@click.argument("metrics_path", type=click.Path(exists=True))
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON instead of text report.")
+def analyze(metrics_path: str, as_json: bool):
+    """Analyze metrics and recommend: distill, keep, or fix."""
+    metrics = json.loads(Path(metrics_path).read_text())
+    report = analyze_metrics(metrics)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+    else:
+        click.echo(format_report(report))
 
 
 def _serialize_results(step_results: list) -> list[dict]:
