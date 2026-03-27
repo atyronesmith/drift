@@ -178,6 +178,29 @@ The most effective defenses against self-inflicted damage are not LLM-based at a
 
 **The connection to drift**: Output non-determinism is itself an operational risk. If an agent produces different code on different runs (as drift measures), some of those variants may be correct and others may introduce bugs. On self-hosted Ollama at temp=0, drift shows 100% identical output — the agent will always do the same thing, whether right or wrong. On DeepInfra, the 40% exact match rate on code generation means the agent's behavior varies across invocations. In a system with write access, this variability is not just a quality concern — it is a safety concern. An agent that produces correct code 80% of the time and subtly buggy code 20% of the time is more dangerous than one that is consistently wrong, because the inconsistency makes testing unreliable.
 
+### The reviewable artifact as a zero-cost safety layer
+
+The most effective defense against operational damage may not involve any compute overhead at all. It's the **reviewable artifact** — the playbook, the pull request, the configuration diff — that sits between agent intent and execution.
+
+In traditional infrastructure automation (Ansible, Terraform, CI/CD pipelines), the workflow produces a declarative artifact — a playbook, a plan, a manifest — that gets committed to git, linted, reviewed, approved in a pipeline, and audited after execution. This artifact is the governance layer. It's what prevents a `user: state=absent` from deleting the wrong user, not because it's idempotent (it is), but because a human or automated check reads it before it runs.
+
+When agents bypass this layer — executing infrastructure operations directly without producing a reviewable artifact — the governance layer disappears. The agent decides which operation to run, with which parameters, against which targets, and the only thing between intent and execution is the agent's own judgment.
+
+**Drift data quantifies this risk.** Our functional equivalence testing (Experiment 3 in [RESULTS.md](RESULTS.md)) found that 1 in 30 code variants (3.3%) produced by an LLM pipeline contained a real bug — a duplicate dictionary key that silently returned wrong data. All 30 variants looked plausible. Only execution against a test suite revealed the defect. In an infrastructure context, that's a 3.3% chance per invocation that the agent's action is subtly wrong — not catastrophically wrong (which would be caught), but wrong in a way that corrupts data or misconfigures a system without immediate symptoms.
+
+The reviewable artifact catches this. A playbook or PR that shows `"id": row[0], "id": row[1]` gets flagged in review. An agent that executes the equivalent operation directly does not.
+
+**Cost profile:**
+
+| Safety Layer | Compute Cost | False Negative Rate | Catches Operational Errors? |
+|-------------|-------------|--------------------|-----------------------------|
+| LLM safety judge | ~0.2s GPU per check | Nonzero (bypassable) | Partially |
+| Reviewable artifact (human review) | 0 GPU | Depends on reviewer | Yes |
+| Reviewable artifact (automated lint/test) | ~0 GPU | Near-zero for covered checks | Yes |
+| RBAC / permission check | 0 GPU | Zero | Yes (for covered operations) |
+
+The reviewable artifact pattern is particularly relevant for infrastructure automation frameworks that expose agent-callable tools. The right architecture is not "agent executes modules directly" but "agent produces a reviewable plan, human or CI approves, system executes." MCP servers are well-suited to this pattern — the server can require that write operations produce a plan artifact for approval rather than executing immediately.
+
 ### The cost of having safety: compute
 
 - **AI content moderation market**: $1B (2024) → projected $2.6B (2029).

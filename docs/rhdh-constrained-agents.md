@@ -179,6 +179,38 @@ No single layer is sufficient. Constrained decoding doesn't prevent an agent fro
 
 This is what it means to build agentic systems that, as the user put it, "don't kill us."
 
+## Counter-Example: The Anti-Pattern of Removing Constraints
+
+The AnsibleClaw project (2026) illustrates the opposite approach. It converts Ansible's 3,000+ modules into "skills" that AI agents invoke directly, explicitly removing the playbook — the reviewable, auditable YAML artifact — from the execution path. The architecture is: Agent → Skill wrapper → Ansible module → Infrastructure, with no review gate between the agent's decision and execution.
+
+The project frames this as a feature: "AI agents don't need playbooks; agents need skills." But the playbook was never just a formatting convention. It's the governance layer — the artifact that gets committed to git, linted, reviewed in a pipeline, and audited after execution. Removing it means the agent chooses which modules to run, with which parameters, against which hosts, and the only constraint is the agent's own judgment (plus Ansible's idempotency, which only means running something twice doesn't break things — not that the thing it does is what you wanted).
+
+This is the architectural opposite of the platform's constrained execution pattern. Where the platform starts read-only and gates write operations through RBAC, AnsibleClaw starts with full execution capability and relies on the LLM to make safe choices. Where the platform uses MCP as a chokepoint for policy enforcement, AnsibleClaw uses a custom skill abstraction that bypasses standard protocol boundaries.
+
+An MCP server wrapping Ansible modules would provide the same agent accessibility with the governance layer intact:
+
+- **Approval gates** — agent proposes the module invocation, human or CI confirms before execution
+- **Allowlists** — restrict which modules and target hosts the agent can access
+- **Dry-run default** — execute with Ansible's `--check` mode, require explicit approval for `--apply`
+- **Audit logging** — every invocation recorded with full parameters and results
+- **Scope restrictions** — per-session or per-role limits on what the agent can do
+
+### The Token Cost Objection and Meta-Tool Discovery
+
+A common argument against MCP for large tool surfaces like Ansible (3,000+ modules) is token cost — every tool definition consumes context window tokens. Exposing 3,000 tools with parameter schemas would eat the entire context before the agent starts reasoning.
+
+The solution is a tiered discovery pattern using meta-tools:
+
+| Tool | Purpose |
+|------|---------|
+| `ansible_search` | Takes a query, returns matching module names and brief descriptions |
+| `ansible_module_info` | Takes a module name, returns the full parameter schema |
+| `ansible_execute` | Takes a module name and parameters, runs it (with approval gate) |
+
+Three tool definitions in the context window instead of 3,000. The agent discovers what it needs dynamically. The tool schemas are generated deterministically from `ansible-doc --json` output — no LLM inference required for the discovery layer.
+
+This pattern applies to any large tool surface, not just Ansible. The key insight: discovery is a routing problem, not a generation problem, and it doesn't require the entire catalog in context.
+
 ## Current Limitations and Future Direction
 
 - **MCP tools are read-only** — write operations are acknowledged as needed but require further security considerations. Expect gated write capabilities in future the platform releases.
