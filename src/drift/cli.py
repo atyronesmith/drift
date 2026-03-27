@@ -16,6 +16,7 @@ from drift.pipeline.pipeline import run_pipeline, StepResult, LoopStepResult
 from drift.storage import make_run_dir, save_run, load_runs, save_metrics
 from drift.metrics.text import compute_all
 from drift.metrics.iteration import compute_iteration_metrics
+from drift.metrics.functional import compute_functional_metrics
 from drift.tasks import resolve_task_prompts
 
 
@@ -113,7 +114,21 @@ def run(config_path: str, runs: int, output_dir: str):
 @cli.command()
 @click.argument("results_dir", type=click.Path(exists=True))
 @click.option("--output", "-o", default=None, help="Output path for metrics JSON.")
-def measure(results_dir: str, output: str | None):
+@click.option(
+    "--functional-step", default=None,
+    help="Step name to run functional equivalence tests on (e.g., 'implementer').",
+)
+@click.option(
+    "--functional-tests", "functional_tests_path", default=None,
+    type=click.Path(exists=True),
+    help="Path to functional test module (auto-discovered from task if omitted).",
+)
+@click.option(
+    "--tasks-dir", default="tasks",
+    help="Tasks directory (default: tasks/).",
+)
+def measure(results_dir: str, output: str | None, functional_step: str | None,
+            functional_tests_path: str | None, tasks_dir: str):
     """Compute text metrics on collected results."""
     runs = load_runs(results_dir)
     if not runs:
@@ -126,6 +141,12 @@ def measure(results_dir: str, output: str | None):
         metrics = _measure_pipeline(runs)
     else:
         metrics = _measure_baseline(runs)
+
+    if functional_step and run_type == "pipeline":
+        ft_path = Path(functional_tests_path) if functional_tests_path else None
+        func_metrics = _measure_functional(runs, functional_step, Path(tasks_dir), ft_path)
+        if func_metrics:
+            metrics["functional"] = func_metrics
 
     if output:
         save_metrics(output, metrics)
@@ -206,6 +227,48 @@ def _measure_pipeline(runs: list[dict]) -> dict:
         },
     }
     return result
+
+
+def _measure_functional(
+    runs: list[dict], step_name: str, tasks_dir: Path,
+    explicit_path: Path | None = None,
+) -> dict | None:
+    """Run functional equivalence tests on a named pipeline step."""
+    if explicit_path:
+        test_module_path = explicit_path
+    else:
+        task = runs[0].get("config", {}).get("task")
+        if not task:
+            click.echo("Warning: no task in config, cannot locate functional tests. "
+                        "Use --functional-tests to specify the path.", err=True)
+            return None
+        test_module_path = tasks_dir / task / "functional_tests.py"
+
+    if not test_module_path.exists():
+        click.echo(f"Warning: {test_module_path} not found, skipping functional tests.", err=True)
+        return None
+
+    # Find the step index by name
+    step_names = [s["name"] for s in runs[0]["steps"]]
+    if step_name not in step_names:
+        click.echo(f"Warning: step '{step_name}' not found in [{', '.join(step_names)}].", err=True)
+        return None
+
+    step_idx = step_names.index(step_name)
+    outputs = [r["steps"][step_idx]["response"]["content"] for r in runs]
+
+    click.echo(f"Running functional tests on step '{step_name}' ({len(outputs)} variants)...")
+    metrics = compute_functional_metrics(outputs, test_module_path)
+    click.echo(
+        f"  {metrics['variants_all_pass']}/{metrics['num_variants']} variants pass all tests "
+        f"({metrics['functional_equivalence_rate']:.1%} equivalence rate)"
+    )
+    if metrics["failures"]:
+        for f in metrics["failures"]:
+            click.echo(f"  variant {f['variant']}: {', '.join(f['failed_tests'].keys())}")
+
+    metrics["step"] = step_name
+    return metrics
 
 
 def _get_final_outputs(runs: list[dict]) -> list[str]:
