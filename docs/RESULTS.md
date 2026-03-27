@@ -262,6 +262,51 @@ This is not a correctness bug (the code works when called correctly), but it cre
 
 5. **Functional equivalence testing is a viable drift defense.** A test suite that takes seconds to run caught a bug that 30 runs of text-level drift analysis missed. For code generation pipelines, running generated code against tests is both cheaper and more informative than computing edit distances.
 
+## Experiment 4: Multi-Task Functional Equivalence
+
+**Date**: 2026-03-27
+
+**Goal**: Validate the distillation viability threshold table from [THEORY.md](THEORY.md) across multiple tasks with different complexity profiles.
+
+### Method
+
+Extended functional equivalence testing to the `data_extraction` and `iterative_refactor` tasks using the same test module interface (`extract()` + `tests` dict) as Experiment 3.
+
+**data_extraction** (12 tests, 30 runs): Validates all 12 line items (part numbers, quantities, unit prices, totals), arithmetic consistency (qty × price = total, sum of lines = subtotal), financial totals (subtotal, invoice total, amount due), and entity extraction (seller/buyer names, EINs, invoice metadata).
+
+**iterative_refactor** (10 tests, 5 DeepInfra + 3 Ollama runs): Tests the refactored UserService class against a test SQLite database. Validates the 4 core security fixes (no hardcoded password, parameterized queries in all methods, password excluded from response, no bare except) plus correct behavior (authenticate, search, delete).
+
+### Results
+
+| Task | Provider | Runs | Exact Match | Functional Equivalence |
+|------|----------|------|-------------|----------------------|
+| data_extraction | DeepInfra | 30 | 83.3% (25/30) | **100%** (30/30) |
+| iterative_refactor | DeepInfra | 5 | 60% (3/5) | **100%** (5/5) |
+| iterative_refactor | Ollama | 3 | 100% (3/3) | **100%** (3/3) |
+
+For comparison (Experiment 3):
+
+| Task | Provider | Runs | Exact Match | Functional Equivalence |
+|------|----------|------|-------------|----------------------|
+| code_review | Mixed | 30 | 33% (10/30) | **96.7%** (29/30) |
+
+### Where the Drift Was
+
+**data_extraction**: The 5 textually unique variants differed only in description string formatting — whether rate/percentage text was included in description fields vs. placed in dedicated rate fields. All numeric values, line items, and financial totals were identical across all 30 runs.
+
+**iterative_refactor (DeepInfra)**: The 2 textually unique variants differed in `delete_user` exception handling style — single `sqlite3.Error` handler vs. dual handler (`sqlite3.Error` + generic `Exception`). Both approaches are correct; the difference is defensive depth, not correctness. All 4 security fixes (parameterized queries, password removal, no hardcoded secrets, specific exceptions) were applied identically in all 5 runs.
+
+### Distillation Viability Validation
+
+All four task configurations land in the top two bands of the threshold table:
+
+| Band | Criteria | Tasks |
+|------|----------|-------|
+| >99% | Distill to code | data_extraction (100%), iterative_refactor (100%) |
+| 95-99% | Distill common path, LLM for edge cases | code_review (96.7%) |
+
+The threshold table holds across tasks of different types (JSON extraction, code refactoring, code review) and different complexity (12 line items with financial math vs. 4 security bugs vs. 5 planted bugs in a 3-stage pipeline). The key finding: **textual drift is a poor proxy for functional drift.** A task with 33% exact match can still have 96.7% functional equivalence; a task with 60% exact match can have 100%.
+
 ---
 
 ## Literature Context

@@ -40,12 +40,16 @@ That said, for narrow, well-defined tasks, you can observe the model's outputs a
 
 ### Drift as a Distillation Viability Metric
 
-Our functional equivalence data (Experiment 3 in [RESULTS.md](RESULTS.md)) provides exactly this signal:
+Our functional equivalence data across three tasks validates this signal:
 
-- **96.7% functional equivalence** across 30 code variants with 47-73% textual edit distance
-- The model consistently applies the same rules: parameterized queries (30/30), password exclusion (30/30), batch queries (30/30)
-- Surface-level expression varies wildly, but the underlying decisions are stable
-- **3.3% failure rate** (1 variant with a duplicate dictionary key bug) marks the boundary where the model's output becomes unreliable
+| Task | Textual Exact Match | Functional Equivalence | Drift Source |
+|------|-------------------|----------------------|--------------|
+| code_review (30 runs, DeepInfra) | 33% | 96.7% | 1 variant with duplicate dict key bug |
+| data_extraction (30 runs, DeepInfra) | 83.3% | 100% | Description formatting, not values |
+| iterative_refactor (5 runs, DeepInfra) | 60% | 100% | Exception handler style, not security fixes |
+| iterative_refactor (3 runs, Ollama) | 100% | 100% | No drift (single GPU, deterministic) |
+
+The pattern is consistent: **textual drift wildly overstates functional drift.** Models vary in surface expression while applying the same underlying rules. The one genuine failure (code_review variant 5, duplicate dictionary key) produced a real bug — a 3.3% defect rate from drift alone.
 
 This suggests a measurable threshold:
 
