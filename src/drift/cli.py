@@ -142,9 +142,13 @@ def measure(results_dir: str, output: str | None, functional_step: str | None,
     else:
         metrics = _measure_baseline(runs)
 
+    ft_path = Path(functional_tests_path) if functional_tests_path else None
     if functional_step and run_type == "pipeline":
-        ft_path = Path(functional_tests_path) if functional_tests_path else None
         func_metrics = _measure_functional(runs, functional_step, Path(tasks_dir), ft_path)
+        if func_metrics:
+            metrics["functional"] = func_metrics
+    elif run_type == "baseline":
+        func_metrics = _measure_functional_baseline(runs, Path(tasks_dir), ft_path)
         if func_metrics:
             metrics["functional"] = func_metrics
 
@@ -268,6 +272,35 @@ def _measure_functional(
             click.echo(f"  variant {f['variant']}: {', '.join(f['failed_tests'].keys())}")
 
     metrics["step"] = step_name
+    return metrics
+
+
+def _measure_functional_baseline(
+    runs: list[dict], tasks_dir: Path,
+    explicit_path: Path | None = None,
+) -> dict | None:
+    """Run functional equivalence tests on baseline results."""
+    if explicit_path:
+        test_module_path = explicit_path
+    else:
+        task = runs[0].get("config", {}).get("task")
+        if not task:
+            return None
+        test_module_path = tasks_dir / task / "functional_tests.py"
+
+    if not test_module_path.exists():
+        return None
+
+    outputs = [r["response"]["content"] for r in runs]
+    click.echo(f"Running functional tests ({len(outputs)} variants)...")
+    metrics = compute_functional_metrics(outputs, test_module_path)
+    click.echo(
+        f"  {metrics['variants_all_pass']}/{metrics['num_variants']} variants pass all tests "
+        f"({metrics['functional_equivalence_rate']:.1%} equivalence rate)"
+    )
+    if metrics["failures"]:
+        for f in metrics["failures"]:
+            click.echo(f"  variant {f['variant']}: {', '.join(f['failed_tests'].keys())}")
     return metrics
 
 
