@@ -131,6 +131,23 @@ def run(config_path: str, runs: int, output_dir: str):
 def measure(results_dir: str, output: str | None, functional_step: str | None,
             functional_tests_path: str | None, tasks_dir: str):
     """Compute text metrics on collected results."""
+    ft_path = Path(functional_tests_path) if functional_tests_path else None
+    metrics = _compute_metrics(results_dir, functional_step, ft_path, Path(tasks_dir))
+
+    if output:
+        save_metrics(output, metrics)
+        click.echo(f"Metrics saved to {output}")
+    else:
+        click.echo(json.dumps(metrics, indent=2))
+
+
+def _compute_metrics(
+    results_dir: str,
+    functional_step: str | None = None,
+    functional_tests_path: Path | None = None,
+    tasks_dir: Path = Path("tasks"),
+) -> dict:
+    """Core metrics computation. Used by both measure and analyze commands."""
     runs = load_runs(results_dir)
     if not runs:
         click.echo("No run files found.", err=True)
@@ -143,29 +160,44 @@ def measure(results_dir: str, output: str | None, functional_step: str | None,
     else:
         metrics = _measure_baseline(runs)
 
-    ft_path = Path(functional_tests_path) if functional_tests_path else None
     if functional_step and run_type == "pipeline":
-        func_metrics = _measure_functional(runs, functional_step, Path(tasks_dir), ft_path)
+        func_metrics = _measure_functional(runs, functional_step, tasks_dir, functional_tests_path)
         if func_metrics:
             metrics["functional"] = func_metrics
     elif run_type == "baseline":
-        func_metrics = _measure_functional_baseline(runs, Path(tasks_dir), ft_path)
+        func_metrics = _measure_functional_baseline(runs, tasks_dir, functional_tests_path)
         if func_metrics:
             metrics["functional"] = func_metrics
 
-    if output:
-        save_metrics(output, metrics)
-        click.echo(f"Metrics saved to {output}")
-    else:
-        click.echo(json.dumps(metrics, indent=2))
+    return metrics
 
 
 @cli.command()
-@click.argument("metrics_path", type=click.Path(exists=True))
+@click.argument("path", type=click.Path(exists=True))
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON instead of text report.")
-def analyze(metrics_path: str, as_json: bool):
-    """Analyze metrics and recommend: distill, keep, or fix."""
-    metrics = json.loads(Path(metrics_path).read_text())
+@click.option(
+    "--functional-step", default=None,
+    help="Step name for functional tests (pipeline results dirs only).",
+)
+@click.option(
+    "--functional-tests", "functional_tests_path", default=None,
+    type=click.Path(exists=True),
+    help="Path to functional test module (auto-discovered from task if omitted).",
+)
+@click.option("--tasks-dir", default="tasks", help="Tasks directory (default: tasks/).")
+def analyze(path: str, as_json: bool, functional_step: str | None,
+            functional_tests_path: str | None, tasks_dir: str):
+    """Analyze metrics and recommend: distill, keep, or fix.
+
+    PATH can be a metrics JSON file or a results directory.
+    """
+    p = Path(path)
+    if p.is_dir():
+        ft_path = Path(functional_tests_path) if functional_tests_path else None
+        metrics = _compute_metrics(path, functional_step, ft_path, Path(tasks_dir))
+    else:
+        metrics = json.loads(p.read_text())
+
     report = analyze_metrics(metrics)
     if as_json:
         click.echo(json.dumps(report, indent=2))
