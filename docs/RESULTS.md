@@ -307,6 +307,36 @@ All four task configurations land in the top two bands of the threshold table:
 
 The threshold table holds across tasks of different types (JSON extraction, code refactoring, code review) and different complexity (12 line items with financial math vs. 4 security bugs vs. 5 planted bugs in a 3-stage pipeline). The key finding: **textual drift is a poor proxy for functional drift.** A task with 33% exact match can still have 96.7% functional equivalence; a task with 60% exact match can have 100%.
 
+## Experiment 5: Qwen3 Model Comparison
+
+**Date**: 2026-03-30
+
+**Goal**: Compare drift characteristics of Qwen3 (30b) and Qwen3.5 (35b) against the Qwen2.5 (32b) baseline on the same tasks and infrastructure (single-GPU Ollama, temp=0).
+
+### Results
+
+| Task | Model | Runs | Exact Match | Functional Eq | Mean Latency |
+|------|-------|------|-------------|---------------|-------------|
+| data_extraction | qwen2.5:32b | 30 | 100% | 100% | 173s |
+| data_extraction | qwen3:30b | 10 | 90% (2 unique) | 100% | 172s |
+| data_extraction | qwen3.5:35b | 1 | — | 0% | 369s |
+| iterative_refactor | qwen2.5:32b | 5 | 60% | 100% | 38s |
+| iterative_refactor | qwen3:30b | 5 | 20% (2 unique) | 0% | 89s |
+
+### Key Findings
+
+**1. Qwen3 introduces drift where Qwen2.5 was deterministic.** On the same single-GPU Ollama instance at temp=0, Qwen2.5:32b produced 100% exact match on data_extraction. Qwen3:30b produces 90% — the first run differs from subsequent runs (likely KV cache warming). The drift is cosmetic: `184.5` vs `184.50` in JSON numeric formatting. All functional tests pass.
+
+**2. Qwen3 has a model capability regression on security tasks.** On iterative_refactor, all 5 Qwen3 runs expose the password field in the `authenticate` response — a bug that Qwen2.5 fixed in all runs. Qwen3 fixes parameterized queries, removes the hardcoded password constant, and uses specific exception handling, but consistently misses the password exposure issue. This is not drift (it's consistent across runs) — it's a model-level blind spot.
+
+**3. Qwen3.5 is unusable for structured extraction without schema constraints.** A single run returned `$`-formatted strings (`"$184.50"`, `"$2,214.00"`) instead of numeric values, causing all arithmetic tests to fail. This is exactly the failure mode that SGLang's constrained decoding would prevent — and a concrete argument for schema enforcement at the inference layer.
+
+**4. Functional tests catch model regressions that text metrics miss.** The iterative_refactor Qwen3 results show 20% exact match and the analysis module would classify the text drift as "significant." But the real problem isn't drift — it's that the model consistently produces incorrect output. Without functional tests, this would be invisible: the output *looks* reasonable and has the right structure.
+
+### Implications for Model Upgrades
+
+These results demonstrate that upgrading a model version (Qwen2.5 → Qwen3) is not safe without regression testing. A model that scored 100% functional equivalence on a task can drop to 0% on the same task with a newer version. The `drift analyze` workflow provides this safety net: run the same experiment on the new model, compare functional equivalence, and only deploy if the new model maintains or improves the equivalence rate.
+
 ---
 
 ## Literature Context

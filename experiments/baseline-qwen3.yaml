@@ -1,0 +1,8 @@
+experiment:
+  name: baseline-qwen3
+  model: qwen3:30b
+  temperature: 0
+  task: code_review
+
+  system_prompt_file: reviewer_system.md
+  user_prompt_file: reviewer_user.md

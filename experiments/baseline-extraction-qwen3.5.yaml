@@ -1,0 +1,8 @@
+experiment:
+  name: baseline-extraction-qwen3.5
+  model: qwen3.5:35b
+  temperature: 0
+  task: data_extraction
+
+  system_prompt_file: extractor_system.md
+  user_prompt_file: extractor_user.md
