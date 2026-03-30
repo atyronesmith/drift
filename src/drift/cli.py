@@ -205,6 +205,164 @@ def analyze(path: str, as_json: bool, functional_step: str | None,
         click.echo(format_report(report))
 
 
+@cli.command()
+@click.argument("path_a", type=click.Path(exists=True))
+@click.argument("path_b", type=click.Path(exists=True))
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+@click.option("--functional-step", default=None, help="Step name for functional tests.")
+@click.option("--functional-tests", "functional_tests_path", default=None,
+              type=click.Path(exists=True), help="Path to functional test module.")
+@click.option("--tasks-dir", default="tasks", help="Tasks directory.")
+def compare(path_a: str, path_b: str, as_json: bool, functional_step: str | None,
+            functional_tests_path: str | None, tasks_dir: str):
+    """Compare two result sets side by side.
+
+    Each PATH can be a metrics JSON file or a results directory.
+    """
+    ft_path = Path(functional_tests_path) if functional_tests_path else None
+    metrics_a = _load_or_compute(path_a, functional_step, ft_path, Path(tasks_dir))
+    metrics_b = _load_or_compute(path_b, functional_step, ft_path, Path(tasks_dir))
+    result = _build_comparison(metrics_a, metrics_b, path_a, path_b)
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(_format_comparison(result))
+
+
+def _load_or_compute(path: str, functional_step: str | None = None,
+                     functional_tests_path: Path | None = None,
+                     tasks_dir: Path = Path("tasks")) -> dict:
+    """Load metrics from JSON file or compute from results directory."""
+    p = Path(path)
+    if p.is_dir():
+        return _compute_metrics(path, functional_step, functional_tests_path, tasks_dir)
+    return json.loads(p.read_text())
+
+
+def _build_comparison(a: dict, b: dict, label_a: str, label_b: str) -> dict:
+    """Build a structured comparison between two metric sets."""
+    def _get(m, key, default=None):
+        return m.get(key, m.get("final", {}).get(key, default))
+
+    comparison = {
+        "a": {"label": label_a, "type": a.get("type")},
+        "b": {"label": label_b, "type": b.get("type")},
+        "metrics": {},
+    }
+
+    keys = [
+        ("exact_match_rate", "Exact match", ".0%"),
+        ("num_unique", "Unique outputs", "d"),
+        ("mean_edit_distance", "Mean edit distance", ".4f"),
+        ("length_cv", "Length CV", ".3f"),
+    ]
+    for key, label, _ in keys:
+        val_a = _get(a, key)
+        val_b = _get(b, key)
+        comparison["metrics"][key] = {"label": label, "a": val_a, "b": val_b}
+
+    # Latency
+    lat_a = a.get("mean_latency_ms")
+    lat_b = b.get("mean_latency_ms")
+    comparison["metrics"]["mean_latency_ms"] = {"label": "Mean latency", "a": lat_a, "b": lat_b}
+
+    # Model info
+    comparison["a"]["model"] = a.get("model") or _pipeline_models(a)
+    comparison["b"]["model"] = b.get("model") or _pipeline_models(b)
+
+    # Functional equivalence
+    func_a = a.get("functional", {})
+    func_b = b.get("functional", {})
+    if func_a or func_b:
+        comparison["functional"] = {
+            "a": func_a.get("functional_equivalence_rate"),
+            "b": func_b.get("functional_equivalence_rate"),
+            "a_bugs": func_a.get("variants_with_bugs"),
+            "b_bugs": func_b.get("variants_with_bugs"),
+        }
+
+    return comparison
+
+
+def _pipeline_models(m: dict) -> str | None:
+    steps = m.get("per_step", [])
+    models = [s.get("model", "") for s in steps if s.get("model")]
+    return " → ".join(models) if models else None
+
+
+def _format_comparison(comp: dict) -> str:
+    lines = []
+    lines.append("DRIFT COMPARISON")
+    lines.append("=" * 60)
+
+    a_label = Path(comp["a"]["label"]).name
+    b_label = Path(comp["b"]["label"]).name
+
+    lines.append(f"  A: {a_label}")
+    if comp["a"].get("model"):
+        lines.append(f"     Model: {comp['a']['model']}")
+    lines.append(f"  B: {b_label}")
+    if comp["b"].get("model"):
+        lines.append(f"     Model: {comp['b']['model']}")
+    lines.append("")
+
+    lines.append(f"  {'Metric':<24} {'A':>12} {'B':>12} {'Delta':>12}")
+    lines.append("  " + "-" * 56)
+
+    for key, info in comp["metrics"].items():
+        val_a = info["a"]
+        val_b = info["b"]
+        label = info["label"]
+
+        if val_a is None and val_b is None:
+            continue
+
+        # Format values
+        if key == "exact_match_rate":
+            sa = f"{val_a:.0%}" if val_a is not None else "—"
+            sb = f"{val_b:.0%}" if val_b is not None else "—"
+        elif key == "mean_latency_ms":
+            sa = f"{val_a/1000:.1f}s" if val_a is not None else "—"
+            sb = f"{val_b/1000:.1f}s" if val_b is not None else "—"
+        elif key == "num_unique":
+            sa = str(int(val_a)) if val_a is not None else "—"
+            sb = str(int(val_b)) if val_b is not None else "—"
+        else:
+            sa = f"{val_a:.4f}" if val_a is not None else "—"
+            sb = f"{val_b:.4f}" if val_b is not None else "—"
+
+        # Delta
+        if val_a is not None and val_b is not None:
+            delta = val_b - val_a
+            if key == "exact_match_rate":
+                sd = f"{delta:+.0%}"
+            elif key == "mean_latency_ms":
+                sd = f"{delta/1000:+.1f}s"
+            elif key == "num_unique":
+                sd = f"{delta:+.0f}"
+            else:
+                sd = f"{delta:+.4f}"
+        else:
+            sd = "—"
+
+        lines.append(f"  {label:<24} {sa:>12} {sb:>12} {sd:>12}")
+
+    func = comp.get("functional")
+    if func:
+        lines.append("")
+        lines.append("  FUNCTIONAL EQUIVALENCE")
+        lines.append("  " + "-" * 56)
+        fa = f"{func['a']:.0%}" if func["a"] is not None else "—"
+        fb = f"{func['b']:.0%}" if func["b"] is not None else "—"
+        ba = str(func.get("a_bugs", "—"))
+        bb = str(func.get("b_bugs", "—"))
+        lines.append(f"  {'Equivalence rate':<24} {fa:>12} {fb:>12}")
+        lines.append(f"  {'Variants with bugs':<24} {ba:>12} {bb:>12}")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _serialize_results(step_results: list) -> list[dict]:
     """Serialize a mix of StepResult and LoopStepResult to dicts."""
     out = []
@@ -298,14 +456,12 @@ def _measure_functional(
         click.echo(f"Warning: {test_module_path} not found, skipping functional tests.", err=True)
         return None
 
-    # Find the step index by name
-    step_names = [s["name"] for s in runs[0]["steps"]]
-    if step_name not in step_names:
-        click.echo(f"Warning: step '{step_name}' not found in [{', '.join(step_names)}].", err=True)
+    # Find the step — check top-level steps first, then inside loops
+    outputs = _extract_step_outputs(runs, step_name)
+    if outputs is None:
+        all_names = _collect_step_names(runs[0]["steps"])
+        click.echo(f"Warning: step '{step_name}' not found in [{', '.join(all_names)}].", err=True)
         return None
-
-    step_idx = step_names.index(step_name)
-    outputs = [r["steps"][step_idx]["response"]["content"] for r in runs]
 
     click.echo(f"Running functional tests on step '{step_name}' ({len(outputs)} variants)...")
     metrics = compute_functional_metrics(outputs, test_module_path)
@@ -348,6 +504,47 @@ def _measure_functional_baseline(
         for f in metrics["failures"]:
             click.echo(f"  variant {f['variant']}: {', '.join(f['failed_tests'].keys())}")
     return metrics
+
+
+def _collect_step_names(steps: list[dict]) -> list[str]:
+    """Collect all step names including those inside loops."""
+    names = []
+    for s in steps:
+        names.append(s["name"])
+        if s.get("type") == "loop":
+            for iteration in s.get("iterations", []):
+                for inner in iteration:
+                    if inner["name"] not in names:
+                        names.append(inner["name"])
+    return names
+
+
+def _extract_step_outputs(runs: list[dict], step_name: str) -> list[str] | None:
+    """Extract outputs for a named step, searching inside loops if needed."""
+    # Check top-level steps
+    step_names = [s["name"] for s in runs[0]["steps"]]
+    if step_name in step_names:
+        step_idx = step_names.index(step_name)
+        return [r["steps"][step_idx]["response"]["content"] for r in runs]
+
+    # Search inside loop steps
+    for step_idx, step in enumerate(runs[0]["steps"]):
+        if step.get("type") != "loop":
+            continue
+        # Check if any iteration contains this step name
+        for iteration in step.get("iterations", []):
+            inner_names = [s["name"] for s in iteration]
+            if step_name in inner_names:
+                inner_idx = inner_names.index(step_name)
+                # Extract from last iteration of each run
+                outputs = []
+                for r in runs:
+                    loop = r["steps"][step_idx]
+                    last_iter = loop["iterations"][-1]
+                    outputs.append(last_iter[inner_idx]["response"]["content"])
+                return outputs
+
+    return None
 
 
 def _get_final_outputs(runs: list[dict]) -> list[str]:
