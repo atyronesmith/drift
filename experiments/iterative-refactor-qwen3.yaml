@@ -1,0 +1,39 @@
+experiment:
+  name: iterative-refactor-qwen3
+  type: pipeline
+  task: iterative_refactor
+
+  steps:
+    - name: initial_analysis
+      model: qwen3:30b
+      temperature: 0
+      system_prompt_file: analyzer_system.md
+      user_prompt_file: analyzer_user.md
+
+    - name: refactor_loop
+      type: loop
+      max_iterations: 5
+      loop_condition:
+        step: verifier
+        field: recommendation
+        continue_values: ["iterate"]
+        abort_values: ["abort"]
+      steps:
+        - name: implementer
+          model: qwen3:30b
+          temperature: 0
+          system_prompt_file: implementer_system.md
+          user_prompt_file: implementer_user.md
+
+        - name: verifier
+          model: qwen3:30b
+          temperature: 0
+          system_prompt_file: verifier_system.md
+          user_prompt_file: verifier_user.md
+
+        - name: re_analyzer
+          model: qwen3:30b
+          temperature: 0
+          feeds_loop_input: true
+          system_prompt_file: analyzer_system.md
+          user_prompt_file: re_analyzer_user.md
