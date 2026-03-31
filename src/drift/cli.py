@@ -186,8 +186,10 @@ def _compute_metrics(
     help="Path to functional test module (auto-discovered from task if omitted).",
 )
 @click.option("--tasks-dir", default="tasks", help="Tasks directory (default: tasks/).")
+@click.option("--probe-data", default=None, type=click.Path(exists=True),
+              help="Probe results JSON (from drift probe -o) for entropy analysis.")
 def analyze(path: str, as_json: bool, functional_step: str | None,
-            functional_tests_path: str | None, tasks_dir: str):
+            functional_tests_path: str | None, tasks_dir: str, probe_data: str | None):
     """Analyze metrics and recommend: distill, keep, or fix.
 
     PATH can be a metrics JSON file or a results directory.
@@ -199,7 +201,8 @@ def analyze(path: str, as_json: bool, functional_step: str | None,
     else:
         metrics = json.loads(p.read_text())
 
-    report = analyze_metrics(metrics)
+    probe = json.loads(Path(probe_data).read_text()) if probe_data else None
+    report = analyze_metrics(metrics, probe_data=probe)
     if as_json:
         click.echo(json.dumps(report, indent=2))
     else:
@@ -599,7 +602,8 @@ def _get_final_outputs(runs: list[dict]) -> list[str]:
 @click.argument("config_path", type=click.Path(exists=True))
 @click.option("--output", "-o", default=None, help="Save probe results to JSON.")
 @click.option("--top-logprobs", default=5, help="Number of top alternatives per token.")
-def probe(config_path: str, output: str | None, top_logprobs: int):
+@click.option("--rules", is_flag=True, help="Run rule extraction analysis on JSON output.")
+def probe(config_path: str, output: str | None, top_logprobs: int, rules: bool):
     """Probe token-level confidence for a baseline experiment.
 
     Runs the experiment once with logprobs enabled and analyzes
@@ -665,24 +669,33 @@ def probe(config_path: str, output: str | None, top_logprobs: int):
             alt_str = ", ".join(f"{a['token']!r}" for a in alts)
             click.echo(f"  [{idx:4d}] {tok_display:<20} entropy={entropy:.2f}  alts: {alt_str}")
 
+    probe_data = {
+        "model": result.model,
+        "stats": stats,
+        "segments": [
+            {"type": s["type"], "text": s["text"], "start": s["start"], "end": s["end"]}
+            for s in segments
+        ],
+        "high_entropy_tokens": [
+            {"index": idx, "token": tok, "entropy": ent,
+             "alternatives": [a["token"] for a in result.tokens[idx].top_alternatives[:5]]}
+            for idx, tok, ent in high
+        ],
+        "tokens": [
+            {"token": t.token, "logprob": t.logprob, "entropy": t.entropy}
+            for t in result.tokens
+        ],
+    }
+
+    if rules:
+        from drift.probing.synthesizer import analyze_fields, format_rules
+        input_text = exp.get("input", "")
+        field_rules = analyze_fields(probe_data, input_text)
+        if field_rules:
+            click.echo()
+            click.echo(format_rules(field_rules))
+
     if output:
-        probe_data = {
-            "model": result.model,
-            "stats": stats,
-            "segments": [
-                {"type": s["type"], "text": s["text"], "start": s["start"], "end": s["end"]}
-                for s in segments
-            ],
-            "high_entropy_tokens": [
-                {"index": idx, "token": tok, "entropy": ent,
-                 "alternatives": [a["token"] for a in result.tokens[idx].top_alternatives[:5]]}
-                for idx, tok, ent in high
-            ],
-            "tokens": [
-                {"token": t.token, "logprob": t.logprob, "entropy": t.entropy}
-                for t in result.tokens
-            ],
-        }
         Path(output).write_text(json.dumps(probe_data, indent=2))
         click.echo(f"\nProbe data saved to {output}")
 
