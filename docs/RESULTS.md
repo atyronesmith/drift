@@ -337,6 +337,20 @@ The threshold table holds across tasks of different types (JSON extraction, code
 
 These results demonstrate that upgrading a model version (Qwen2.5 → Qwen3) is not safe without regression testing. A model that scored 100% functional equivalence on a task can drop to 0% on the same task with a newer version. The `drift analyze` workflow provides this safety net: run the same experiment on the new model, compare functional equivalence, and only deploy if the new model maintains or improves the equivalence rate.
 
+### Qwen3 /nothink Mode
+
+Disabling Qwen3's thinking mode with `/nothink` partially addresses the password exclusion regression:
+
+| Config | Functional Eq | First-run bug | Mean implementer latency |
+|--------|--------------|---------------|-------------------------|
+| qwen3:30b (think) | 0% (0/5) | password exposed in all 5 | 89s |
+| qwen3:30b /nothink | 80% (4/5) | password exposed in run 0 only | 89s |
+| qwen2.5:32b (baseline) | 100% (5/5) | none | 38s |
+
+On data_extraction, `/nothink` is 24% faster (131s vs 172s) but introduces a new failure: the first run returns `$`-formatted strings instead of numbers (same type error as Qwen3.5).
+
+**The cold-model first-run pattern**: across both tasks and both thinking modes, Qwen3's first run after model load produces different (and often worse) output than subsequent runs. This is consistent with KV cache initialization effects. The practical mitigation: discard the first inference after loading a new model.
+
 ---
 
 ## Literature Context

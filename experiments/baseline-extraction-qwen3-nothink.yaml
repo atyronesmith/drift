@@ -1,0 +1,8 @@
+experiment:
+  name: baseline-extraction-qwen3-nothink
+  model: qwen3:30b
+  temperature: 0
+  task: data_extraction
+
+  system_prompt_file: extractor_system_nothink.md
+  user_prompt_file: extractor_user.md
