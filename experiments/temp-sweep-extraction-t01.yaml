@@ -1,0 +1,8 @@
+experiment:
+  name: temp-sweep-extraction-t01
+  model: qwen2.5:32b
+  temperature: 0.1
+  task: data_extraction
+
+  system_prompt_file: extractor_system.md
+  user_prompt_file: extractor_user.md

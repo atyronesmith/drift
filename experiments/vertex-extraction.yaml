@@ -1,0 +1,11 @@
+experiment:
+  name: vertex-extraction
+  provider: vertex
+  model: claude-sonnet-4-6
+  temperature: 0
+  project_id: your-gcp-project-id
+  region: your-gcp-region
+  task: data_extraction
+
+  system_prompt_file: extractor_system.md
+  user_prompt_file: extractor_user.md
