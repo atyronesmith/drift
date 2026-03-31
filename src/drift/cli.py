@@ -14,9 +14,10 @@ import yaml
 from drift.providers.factory import make_provider
 from drift.pipeline.pipeline import run_pipeline, StepResult, LoopStepResult
 from drift.storage import make_run_dir, save_run, load_runs, save_metrics
-from drift.metrics.text import compute_all
+from drift.metrics.text import compute_all, pairwise_edit_distances
 from drift.metrics.iteration import compute_iteration_metrics
 from drift.metrics.functional import compute_functional_metrics
+from drift.metrics.stats import bootstrap_ci, permutation_test
 from drift.tasks import resolve_task_prompts
 from drift.analysis import analyze_metrics, format_report
 
@@ -40,7 +41,7 @@ async def _run_baseline(config: dict, num_runs: int, output_dir: str) -> Path:
 
     for i in range(num_runs):
         click.echo(f"  Run {i + 1}/{num_runs}...", nl=False)
-        response = await provider.complete(system, prompt)
+        response = await provider.complete(system, prompt, temperature=exp.get("temperature", 0))
         result = {
             "run_index": i,
             "type": "baseline",
@@ -279,7 +280,15 @@ def _build_comparison(a: dict, b: dict, label_a: str, label_b: str) -> dict:
             "b": func_b.get("functional_equivalence_rate"),
             "a_bugs": func_a.get("variants_with_bugs"),
             "b_bugs": func_b.get("variants_with_bugs"),
+            "a_ci": func_a.get("ci_95"),
+            "b_ci": func_b.get("ci_95"),
         }
+
+    # Confidence intervals for edit distance
+    ci_a = a.get("edit_distance_ci_95") or _get(a, "edit_distance_ci_95")
+    ci_b = b.get("edit_distance_ci_95") or _get(b, "edit_distance_ci_95")
+    if ci_a or ci_b:
+        comparison["edit_distance_ci"] = {"a": ci_a, "b": ci_b}
 
     return comparison
 
@@ -347,6 +356,16 @@ def _format_comparison(comp: dict) -> str:
 
         lines.append(f"  {label:<24} {sa:>12} {sb:>12} {sd:>12}")
 
+    # Confidence intervals for edit distance
+    ed_ci = comp.get("edit_distance_ci")
+    if ed_ci:
+        lines.append("")
+        lines.append("  CONFIDENCE INTERVALS (95%)")
+        lines.append("  " + "-" * 56)
+        for label, ci in [("A edit distance", ed_ci.get("a")), ("B edit distance", ed_ci.get("b"))]:
+            if ci:
+                lines.append(f"  {label:<24} [{ci['lower']:.4f}, {ci['upper']:.4f}]")
+
     func = comp.get("functional")
     if func:
         lines.append("")
@@ -358,6 +377,11 @@ def _format_comparison(comp: dict) -> str:
         bb = str(func.get("b_bugs", "—"))
         lines.append(f"  {'Equivalence rate':<24} {fa:>12} {fb:>12}")
         lines.append(f"  {'Variants with bugs':<24} {ba:>12} {bb:>12}")
+        # CIs for functional equivalence
+        for side, ci_key in [("A", "a_ci"), ("B", "b_ci")]:
+            ci = func.get(ci_key)
+            if ci:
+                lines.append(f"  {side + ' 95% CI':<24} [{ci['lower']:.0%}, {ci['upper']:.0%}]")
 
     lines.append("")
     return "\n".join(lines)
@@ -391,6 +415,17 @@ def _measure_baseline(runs: list[dict]) -> dict:
     metrics["provider"] = runs[0]["response"]["provider"]
     timing = [r["response"]["total_ms"] for r in runs]
     metrics["mean_latency_ms"] = round(sum(timing) / len(timing), 1)
+    config = runs[0].get("config", {})
+    if "temperature" in config:
+        metrics["temperature"] = config["temperature"]
+    # Bootstrap CI for edit distance
+    edit_dists = pairwise_edit_distances(outputs)
+    if len(edit_dists) >= 2:
+        ci = bootstrap_ci(edit_dists)
+        metrics["edit_distance_ci_95"] = {
+            "lower": round(ci["ci_lower"], 6),
+            "upper": round(ci["ci_upper"], 6),
+        }
     return metrics
 
 

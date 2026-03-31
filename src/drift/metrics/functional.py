@@ -25,6 +25,8 @@ import io
 import sys
 from pathlib import Path
 
+from drift.metrics.stats import bootstrap_ci
+
 
 def load_test_module(module_path: Path):
     """Load a functional test module from a file path."""
@@ -117,7 +119,14 @@ def compute_functional_metrics(outputs: list[str], test_module_path: Path) -> di
                 "failed_tests": {name: v[name][1] for name in failed},
             })
 
-    return {
+    # Bootstrap CI for functional equivalence rate
+    pass_flags = [
+        all(v[name][0] in ("pass", "skip") for name in test_names)
+        for v in per_variant
+    ]
+    ci = bootstrap_ci(pass_flags) if n_variants >= 2 else None
+
+    result = {
         "functional_equivalence_rate": round(variants_all_pass / n_variants, 4) if n_variants > 0 else None,
         "variants_all_pass": variants_all_pass,
         "variants_with_bugs": variants_with_bugs,
@@ -126,3 +135,7 @@ def compute_functional_metrics(outputs: list[str], test_module_path: Path) -> di
         "per_test": per_test,
         "failures": failures,
     }
+    if ci:
+        result["ci_95"] = {"lower": round(ci["ci_lower"], 4), "upper": round(ci["ci_upper"], 4)}
+
+    return result

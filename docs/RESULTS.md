@@ -351,6 +351,76 @@ On data_extraction, `/nothink` is 24% faster (131s vs 172s) but introduces a new
 
 **The cold-model first-run pattern**: across both tasks and both thinking modes, Qwen3's first run after model load produces different (and often worse) output than subsequent runs. This is consistent with KV cache initialization effects. The practical mitigation: discard the first inference after loading a new model.
 
+## Experiment 6: Temperature Sweep
+
+**Date**: 2026-03-31
+
+**Goal**: Quantify how drift scales with temperature on a structured extraction task (data_extraction) using the same model and infrastructure that is deterministic at temp=0.
+
+### Setup
+
+- **Model**: qwen2.5:32b on dedicated Ollama (single-GPU, sequential inference)
+- **Task**: data_extraction (complex industrial invoice, 12 line items)
+- **Temperatures**: 0, 0.1, 0.3, 0.5, 1.0
+- **Runs**: 10 per temperature
+
+### Results
+
+| Temp | Exact Match | Unique | Edit Distance | Functional Eq | Bugs |
+|------|-------------|--------|---------------|---------------|------|
+| 0.0  | 100%        | 1      | 0.0000        | 100% (10/10)  | 0    |
+| 0.1  | 20%         | 4      | 0.0006        | 100% (10/10)  | 0    |
+| 0.3  | 10%         | 10     | 0.0184        | 90% (9/10)    | 1    |
+| 0.5  | 10%         | 10     | 0.0348        | 80% (8/10)    | 2    |
+| 1.0  | 10%         | 10     | 0.1326        | 40% (4/10)    | 6    |
+
+### Key Findings
+
+**1. Temp 0 → 0.1 is the cliff for textual determinism.** Exact match drops from 100% to 20% with a tiny temperature nudge. Even temp=0.1 produces 4 unique outputs. However, all are functionally equivalent — the differences are cosmetic (JSON field ordering, number formatting).
+
+**2. Functional equivalence degrades gradually.** While text metrics collapse immediately, functional equivalence holds through temp=0.1 (100%) and degrades linearly: 90% at 0.3, 80% at 0.5, 40% at 1.0. This is the clearest evidence yet that textual drift overstates functional drift.
+
+**3. Temp 1.0 is catastrophic for structured tasks.** 6 of 10 outputs contain numerical errors (wrong prices, quantities, or totals). At high temperatures, the model hallucinates values rather than extracting them from the input.
+
+**4. The distillation viability threshold shifts with temperature.** At temp≤0.1, this task is firmly in the "distill to code" band (100% functional eq). At temp=0.3, it drops to "distill + fallback" (90%). At temp=0.5, "keep with gates" (80%). At temp=1.0, it's "unreliable" (40%). Temperature is the single most important knob for drift control.
+
+### Implications
+
+For production deployments: **always use temp=0 when determinism matters.** Even temp=0.1 introduces enough sampling noise to defeat textual caching. If temp>0 is required (for creativity/diversity), functional testing becomes mandatory — text metrics alone will dramatically overstate the problem.
+
+## Experiment 7: Claude Sonnet via Vertex AI
+
+**Date**: 2026-03-31
+
+**Goal**: Compare drift characteristics of Claude Sonnet (cloud API) against Qwen2.5 (single-GPU Ollama) on the same tasks at temp=0.
+
+### Setup
+
+- **Model**: claude-sonnet-4-6 via Vertex AI (project: your-gcp-project-id, region: your-gcp-region)
+- **Tasks**: data_extraction (10 runs), iterative_refactor (5 runs)
+- **Temperature**: 0
+
+### Results
+
+| Task | Model/Provider | Exact Match | Unique | Edit Distance | Functional Eq |
+|------|---------------|-------------|--------|---------------|---------------|
+| data_extraction | qwen2.5:32b / Ollama | 100% | 1 | 0.0000 | 100% |
+| data_extraction | Claude Sonnet / Vertex | 30% | 4 | 0.0030 | 100% |
+| iterative_refactor | qwen2.5:32b / Ollama | 60% | 3 | 0.0054 | 100% |
+| iterative_refactor | Claude Sonnet / Vertex | 20% | 5 | 0.3968 | 0%* |
+
+*Claude's 0% functional eq on iterative_refactor is not drift — all 5 runs consistently import `bcrypt` (not installed) and use bcrypt password hashing (incompatible with the test DB's plaintext passwords). This is an architectural choice difference, not a quality issue.
+
+### Key Findings
+
+**1. Cloud APIs drift more than single-GPU at temp=0.** Claude Sonnet on Vertex produces 4 unique outputs on data_extraction where Qwen2.5 on a dedicated GPU produces 1. Cloud infrastructure (load balancing, batch processing, different hardware) introduces sampling noise even at temp=0. Despite this, all 4 variants are functionally equivalent.
+
+**2. Different model families make different architectural decisions.** On iterative_refactor, Qwen2.5 makes minimal, conservative fixes (keeps plaintext comparison, parameterizes queries). Claude introduces a new dependency (bcrypt) and redesigns the auth system. Both approaches address the security issues, but Claude's is incompatible with the existing database schema. This is a model personality difference, not drift.
+
+**3. Claude is 9x faster on extraction.** ~19s per run on Vertex vs ~173s on Ollama (qwen2.5:32b). The pipeline task shows similar speedup: ~50s total per run on Vertex vs ~240s+ on Ollama.
+
+**4. Pipeline convergence is immediate on Claude.** All 5 iterative_refactor runs terminated at iteration 1 (verifier found no remaining issues). Qwen2.5 typically runs 2-3 iterations. Claude's first implementer pass is more thorough.
+
 ---
 
 ## Literature Context
