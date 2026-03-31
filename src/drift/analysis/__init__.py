@@ -127,7 +127,44 @@ def _analyze_pipeline_steps(metrics: dict) -> list[dict]:
     return steps
 
 
-def analyze_metrics(metrics: dict) -> dict:
+def _analyze_probe(probe_data: dict) -> dict | None:
+    """Analyze probe data to add entropy-based recommendations."""
+    stats = probe_data.get("stats", {})
+    if not stats:
+        return None
+
+    pct_det = stats.get("pct_deterministic", 0)
+    mean_entropy = stats.get("mean_entropy", 0)
+    num_tokens = stats.get("num_tokens", 0)
+
+    if pct_det >= 0.95:
+        assessment = "rule_extractable"
+        detail = (f"{pct_det:.0%} of tokens are deterministic (mean entropy {mean_entropy:.3f} bits). "
+                  f"This task can be replaced with a parser/template.")
+    elif pct_det >= 0.80:
+        assessment = "partially_extractable"
+        detail = (f"{pct_det:.0%} deterministic tokens. Core extraction is rule-based; "
+                  f"stochastic tokens are formatting choices a schema would resolve.")
+    elif pct_det >= 0.50:
+        assessment = "mixed"
+        detail = (f"{pct_det:.0%} deterministic tokens. Output mixes extraction with "
+                  f"reasoning/generation. Schema constraints would help but can't fully replace the LLM.")
+    else:
+        assessment = "llm_required"
+        detail = (f"Only {pct_det:.0%} deterministic tokens (mean entropy {mean_entropy:.3f} bits). "
+                  f"Output requires LLM reasoning/generation.")
+
+    return {
+        "assessment": assessment,
+        "pct_deterministic": pct_det,
+        "mean_entropy": mean_entropy,
+        "num_tokens": num_tokens,
+        "high_entropy_count": len(probe_data.get("high_entropy_tokens", [])),
+        "detail": detail,
+    }
+
+
+def analyze_metrics(metrics: dict, probe_data: dict | None = None) -> dict:
     """Produce a full analysis from metrics output.
 
     Returns a structured report with findings and recommendations.
@@ -147,6 +184,12 @@ def analyze_metrics(metrics: dict) -> dict:
         report["functional"] = _analyze_functional(func)
     else:
         report["functional"] = {"available": False}
+
+    # Probe / entropy analysis
+    if probe_data:
+        probe_analysis = _analyze_probe(probe_data)
+        if probe_analysis:
+            report["probe"] = probe_analysis
 
     # Top-level verdict
     report["verdict"] = _produce_verdict(report)
@@ -174,6 +217,15 @@ def _produce_verdict(report: dict) -> dict:
                 f"Test '{worst['test']}' has {worst['pass_rate']:.0%} pass rate "
                 f"({worst['failures']} failures). Investigate before distilling."
             )
+
+        # Enhance with probe data
+        probe = report.get("probe")
+        if probe and classification["band"] == "distill":
+            if probe["assessment"] == "rule_extractable":
+                verdict["probe_detail"] = (
+                    f"Probe confirms: {probe['pct_deterministic']:.0%} of tokens are deterministic. "
+                    f"Only {probe['high_entropy_count']} tokens need schema constraints."
+                )
 
         return verdict
 
@@ -245,6 +297,18 @@ def format_report(report: dict) -> str:
             lines.append("  Weak tests:")
             for t in func["weak_tests"]:
                 lines.append(f"    - {t['test']}: {t['pass_rate']:.0%} ({t['failures']} failures)")
+
+    # Probe / entropy analysis
+    probe = report.get("probe")
+    if probe:
+        lines.append("")
+        lines.append("TOKEN ENTROPY (probe)")
+        lines.append("-" * 50)
+        lines.append(f"  Assessment:     {probe['assessment']}")
+        lines.append(f"  Deterministic:  {probe['pct_deterministic']:.0%} of {probe['num_tokens']} tokens")
+        lines.append(f"  Mean entropy:   {probe['mean_entropy']:.3f} bits")
+        lines.append(f"  High entropy:   {probe['high_entropy_count']} tokens")
+        lines.append(f"  {probe['detail']}")
 
     # Pipeline steps
     steps = report.get("pipeline_steps", [])
