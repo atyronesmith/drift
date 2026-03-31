@@ -595,5 +595,97 @@ def _get_final_outputs(runs: list[dict]) -> list[str]:
     return outputs
 
 
+@cli.command()
+@click.argument("config_path", type=click.Path(exists=True))
+@click.option("--output", "-o", default=None, help="Save probe results to JSON.")
+@click.option("--top-logprobs", default=5, help="Number of top alternatives per token.")
+def probe(config_path: str, output: str | None, top_logprobs: int):
+    """Probe token-level confidence for a baseline experiment.
+
+    Runs the experiment once with logprobs enabled and analyzes
+    which tokens are deterministic vs. stochastic.
+    """
+    from drift.probing.logprobs import probe_with_logprobs
+
+    config = yaml.safe_load(Path(config_path).read_text())
+    config = resolve_task_prompts(config, Path.cwd() / "tasks")
+    exp = config["experiment"]
+
+    if exp.get("type") == "pipeline":
+        click.echo("Error: probe only supports baseline experiments.", err=True)
+        sys.exit(1)
+
+    system = exp["system_prompt"]
+    prompt = exp["user_prompt"]
+    if "input" in exp:
+        prompt = prompt.replace("{input}", exp["input"])
+
+    click.echo(f"Probing: {exp['name']}")
+    click.echo(f"Model: {exp['model']}")
+    click.echo(f"Top logprobs: {top_logprobs}")
+    click.echo()
+
+    result = probe_with_logprobs(
+        system=system,
+        prompt=prompt,
+        model=exp["model"],
+        base_url=exp.get("base_url"),
+        top_logprobs=top_logprobs,
+        temperature=exp.get("temperature", 0),
+    )
+
+    stats = result.entropy_stats()
+    click.echo(f"Tokens: {stats['num_tokens']}")
+    click.echo(f"Mean entropy: {stats['mean_entropy']:.3f} bits")
+    click.echo(f"Deterministic (<0.1): {stats['pct_deterministic']:.0%}")
+    click.echo(f"High entropy (>0.5): {stats['pct_high_entropy']:.0%}")
+    click.echo()
+
+    # Show segments
+    segments = result.segment_by_entropy()
+    click.echo("SEGMENTS (deterministic vs stochastic):")
+    click.echo("-" * 60)
+    for seg in segments:
+        marker = "RULE" if seg["type"] == "deterministic" else "LLM "
+        text = seg["text"][:80].replace("\n", "\\n")
+        if len(seg["text"]) > 80:
+            text += "..."
+        click.echo(f"  [{marker}] {text}")
+
+    click.echo()
+
+    # Show top high-entropy tokens
+    high = result.high_entropy_tokens(threshold=0.5)
+    if high:
+        click.echo(f"TOP HIGH-ENTROPY TOKENS ({len(high)} total):")
+        click.echo("-" * 60)
+        for idx, token, entropy in high[:20]:
+            tok_display = repr(token)
+            alts = result.tokens[idx].top_alternatives[:3]
+            alt_str = ", ".join(f"{a['token']!r}" for a in alts)
+            click.echo(f"  [{idx:4d}] {tok_display:<20} entropy={entropy:.2f}  alts: {alt_str}")
+
+    if output:
+        probe_data = {
+            "model": result.model,
+            "stats": stats,
+            "segments": [
+                {"type": s["type"], "text": s["text"], "start": s["start"], "end": s["end"]}
+                for s in segments
+            ],
+            "high_entropy_tokens": [
+                {"index": idx, "token": tok, "entropy": ent,
+                 "alternatives": [a["token"] for a in result.tokens[idx].top_alternatives[:5]]}
+                for idx, tok, ent in high
+            ],
+            "tokens": [
+                {"token": t.token, "logprob": t.logprob, "entropy": t.entropy}
+                for t in result.tokens
+            ],
+        }
+        Path(output).write_text(json.dumps(probe_data, indent=2))
+        click.echo(f"\nProbe data saved to {output}")
+
+
 if __name__ == "__main__":
     cli()
