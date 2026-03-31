@@ -421,6 +421,18 @@ For production deployments: **always use temp=0 when determinism matters.** Even
 
 **4. Pipeline convergence is immediate on Claude.** All 5 iterative_refactor runs terminated at iteration 1 (verifier found no remaining issues). Qwen2.5 typically runs 2-3 iterations. Claude's first implementer pass is more thorough.
 
+### Infrastructure Trifecta (data_extraction at temp=0)
+
+Adding DeepInfra (Qwen2.5-72B-Instruct, shared cloud inference) completes the infrastructure comparison:
+
+| Infrastructure | Model | Exact Match | Unique | Edit Dist | Functional | Latency |
+|----------------|-------|-------------|--------|-----------|------------|---------|
+| Ollama single-GPU | qwen2.5:32b | 100% | 1 | 0.0000 | 100% | ~173s |
+| DeepInfra cloud | Qwen2.5-72B | 90% | 2 | 0.0010 | 100% | ~55s |
+| Vertex AI cloud | Claude Sonnet | 30% | 4 | 0.0030 | 100% | ~20s |
+
+**Finding**: Textual determinism follows a clear gradient — dedicated GPU > shared cloud (same model family) > cloud API (different model). All three maintain 100% functional equivalence. The drift is entirely cosmetic: JSON field ordering, whitespace, and number formatting differences. DeepInfra's 90% exact match (1 of 10 runs differs) is consistent with shared infrastructure batch non-determinism.
+
 ---
 
 ## Literature Context
