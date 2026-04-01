@@ -185,11 +185,48 @@ $ drift run experiments/auto-hybrid-incident-triage.yaml --runs 10
 
 ### Rule Types
 
-| Type | Behavior | Auto-generated when |
-|------|----------|-------------------|
+| Type | Behavior | Generated when |
+|------|----------|----------------|
 | `regex` | Extracts first match, capture group 1 | Value found in input with identifiable label/context |
 | `regex_all` | All matches as a list | Multiple instances of a pattern |
 | `literal` | Fixed value, always emitted | Near-zero entropy but value NOT in input (model always says this) |
+| `mapping` | Lookup table from another extracted field | Multi-ticket probing reveals a field is conditionally deterministic |
+| `conditional` | Ordered conditions on extracted fields, first match wins | Multi-ticket probing reveals a field depends on multiple inputs |
+
+#### Mapping and Conditional Rules
+
+These rule types reference fields extracted by earlier rules, so **rule order matters**. Extract the source fields first, then define the mapping or conditional that uses them.
+
+```yaml
+  # Simple lookup: priority → severity
+  - path: assessment.severity
+    type: mapping
+    source: ticket.stated_priority
+    map:
+      High: P2
+      Medium: P3
+      Low: P4
+      Urgent: P1
+    default: P3
+
+  # Case statement with multiple conditions (first match wins)
+  - path: assessment.severity
+    type: conditional
+    conditions:
+      - when:
+          ticket.stated_priority: High
+          ticket.stated_category: Account
+        value: P3           # outlier: setup tasks get lower severity
+      - when:
+          ticket.stated_priority: High
+        value: P2
+      - when:
+          ticket.stated_priority: Medium
+        value: P3
+    default: P4
+```
+
+These rule types close the gap between single-ticket entropy analysis and multi-ticket behavior. A field may show high entropy on one ticket (the model "deliberates") but produce deterministic results across tickets given the same input features. Multi-ticket probing discovers these patterns, which then become mapping or conditional rules.
 
 ### Output Modes
 
@@ -285,6 +322,118 @@ The synthesizer's key decision is the entropy threshold. Below it, a field becom
   │  Default threshold: 0.3 (configurable via --threshold)         │
   └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Why Entropy Separates Copying from Reasoning
+
+Entropy measures whether the model is **reproducing** something it saw in the input or **choosing** between plausible alternatives. The probe captures the actual token probabilities at decision time:
+
+```
+  Copying (low entropy):
+  ──────────────────────────────────────────────────────────────
+  Output: ticket.id = "1aiu3lrqi"
+  Token: "1aiu3lrqi"    p=1.00    entropy=0.000
+
+  The value is right there in the input: "Ticket ID: 1aiu3lrqi"
+  There's only one right answer. The model knows it.
+
+
+  Reasoning (high entropy):
+  ──────────────────────────────────────────────────────────────
+  Output: assessment.severity = "P3"
+  Token: "3"             p=0.72    entropy=0.86    alts: '2', '4', '1'
+
+  The input says "Priority: Medium" but the model must map that
+  to its own P1-P4 scale. It's 72% confident on P3, but 20%+
+  of the probability mass is on P2. This is a judgment call.
+
+
+  Composing (highest entropy):
+  ──────────────────────────────────────────────────────────────
+  Output: assessment.assignment_group = "Network Support"
+  Token: " Support"      p=0.15    entropy=1.87    alts: ' Team', ' Operations', ' Services'
+
+  No team name appears in the input. The model is inventing a
+  plausible assignment. Four alternatives are nearly equally likely.
+```
+
+**Low entropy = copying.** The answer exists in the input. A regex can do this.
+
+**High entropy = choosing.** The answer requires judgment. Only an LLM can do this.
+
+The entropy threshold (default 0.3) is the boundary between the two. Fields below it become rules. Fields above it stay with the LLM.
+
+### Entropy Is About Uncertainty, Not About Options
+
+Severity is constrained to {P1, P2, P3, P4}. The probabilities across those four choices sum to 1. But that doesn't make entropy zero -- entropy measures how *spread out* the distribution is, not how many valid choices exist:
+
+```
+  Same closed set {P1, P2, P3, P4}, different distributions:
+
+  100% certain (entropy = 0 bits):       Uncertain (entropy ≈ 1.08 bits):
+  ┌────────────────────────────────┐      ┌────────────────────────────────┐
+  │ P1   ░░                    3%  │      │ P1   ░░                    3%  │
+  │ P2   ░░░                   5%  │      │ P2   ██████████           20%  │
+  │ P3   ████████████████████ 91%  │      │ P3   ████████████████████ 72%  │
+  │ P4   ░                     1%  │      │ P4   ░░░                   5%  │
+  └────────────────────────────────┘      └────────────────────────────────┘
+  Model is sure. Could be a rule.         Model is weighing evidence. Needs LLM.
+
+  No idea (entropy = 2.0 bits, maximum for 4 options):
+  ┌────────────────────────────────┐
+  │ P1   ████████████         25%  │
+  │ P2   ████████████         25%  │
+  │ P3   ████████████         25%  │
+  │ P4   ████████████         25%  │
+  └────────────────────────────────┘
+  Uniform distribution. Pure guesswork.
+```
+
+The severity case (0.86 bits out of a maximum 2.0) means the model *leans* P3 but genuinely considers P2 as a possibility. That's the reasoning -- the model is evaluating the ticket content (a network printer issue reported as "Medium" priority) and deciding how severe it is.
+
+Compare with `ticket.id`: there's exactly one ID in the input. All probability mass on one answer. No decision to make. A closed set with an obvious answer has zero entropy. A closed set where the model is weighing evidence has high entropy.
+
+### Conditional Determinism: When "Reasoning" Collapses to a Lookup Table
+
+Single-ticket entropy suggests severity requires judgment -- the model is 72% on P3 and 20% on P2. But what happens when we probe 39 tickets across 13 different (priority, category) combinations?
+
+```
+  Priority   Category           Severity     Deterministic?
+  ────────── ────────────────── ──────────── ──────────────
+  High       Infrastructure     P2, P2, P2   YES
+  High       Network            P2, P2, P2   YES
+  High       Security           P2, P2, P2   YES
+  High       Software           P2, P2, P2   YES
+  High       Account            P2, P2, P3   NO (1 outlier)
+  Medium     Account            P3, P3, P3   YES
+  Medium     Communication      P3, P3, P3   YES
+  Medium     Hardware           P3, P3, P3   YES
+  Medium     Network            P3, P3, P3   YES
+  Medium     RemoteWork         P3, P3, P3   YES
+  Medium     Security           P3, P3, P3   YES
+  Medium     Software           P3, P3, P3   YES
+  Medium     Training           P3, P3, P3   YES
+
+  Deterministic groups: 12/13 (92%)
+```
+
+The category doesn't matter. Severity is a near-perfect 1:1 mapping from the input priority field:
+
+```
+  High   → P2   (11/12 tickets)
+  Medium → P3   (27/27 tickets, 100%)
+```
+
+**Per-token entropy showed the model "thinking" about P2 vs P3.** But across tickets, the outcome is deterministic given the input priority. The model's internal uncertainty on any single ticket doesn't translate to actual variation across tickets.
+
+This means severity could become a conditional rule -- a simple lookup table. No LLM needed. The entropy on a single ticket was a false signal; the model *always* maps Medium→P3 and High→P2, it's just not 100% confident about it on any individual ticket.
+
+The one outlier (High + Account → P3) was a ticket about configuring MFA -- arguably a setup task, not an urgent issue. The model downgraded it based on description content. This suggests the mapping is ~97% driven by the priority field, with rare exceptions where the description overrides it.
+
+**Implication**: multi-ticket probing can discover conditional rules that single-ticket entropy misses. A field that looks like "reasoning" on one ticket may collapse to a lookup table across many tickets. This is a path to extracting even more fields from the LLM.
+
+See [ATTENTION_PLAN.md](ATTENTION_PLAN.md) for a deeper approach: using transformer attention weights to trace which input tokens drive output decisions, enabling discovery of non-obvious conditional mappings.
+
+### Edge Case: Confident Reasoning
 
 Fields like `severity = "P1"` have near-zero entropy even though they require judgment -- the model is just very confident about this particular case. The auto-synthesizer captures these as `literal` rules, which is correct for this input but wouldn't generalize to other incidents. This is a tradeoff: the auto-generated rules are **input-specific** optimizations, not general-purpose extractors.
 

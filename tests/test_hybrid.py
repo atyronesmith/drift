@@ -84,6 +84,118 @@ def test_execute_rules_incident(incident_text):
     assert all(r.matched for r in results)
 
 
+# --- Mapping rule tests ---
+
+def test_mapping_rule_basic():
+    rules = [
+        {"path": "ticket.priority", "type": "regex", "pattern": r"Priority:\s*(\S+)\s*$"},
+        {"path": "assessment.severity", "type": "mapping", "source": "ticket.priority",
+         "map": {"High": "P2", "Medium": "P3", "Low": "P4", "Urgent": "P1"}},
+    ]
+    extracted, results = execute_rules(rules, "Priority:     Medium\nCategory: Network")
+    assert extracted["assessment"]["severity"] == "P3"
+    assert results[1].matched
+
+
+def test_mapping_rule_default():
+    rules = [
+        {"path": "ticket.priority", "type": "literal", "value": "Unknown"},
+        {"path": "assessment.severity", "type": "mapping", "source": "ticket.priority",
+         "map": {"High": "P2", "Medium": "P3"}, "default": "P4"},
+    ]
+    extracted, results = execute_rules(rules, "anything")
+    assert extracted["assessment"]["severity"] == "P4"
+
+
+def test_mapping_rule_missing_source():
+    rule = {"path": "severity", "type": "mapping", "source": "nonexistent",
+            "map": {"a": "b"}, "default": "P3"}
+    result = execute_rule(rule, "text", {})
+    assert result.value == "P3"
+    assert result.matched
+
+
+def test_mapping_rule_no_default_no_match():
+    rule = {"path": "severity", "type": "mapping", "source": "priority",
+            "map": {"High": "P2"}}
+    result = execute_rule(rule, "text", {"priority": "Unknown"})
+    assert not result.matched
+
+
+# --- Conditional rule tests ---
+
+def test_conditional_rule_first_match_wins():
+    rule = {
+        "path": "assessment.severity",
+        "type": "conditional",
+        "conditions": [
+            {"when": {"ticket.priority": "High", "ticket.category": "Account"}, "value": "P3"},
+            {"when": {"ticket.priority": "High"}, "value": "P2"},
+            {"when": {"ticket.priority": "Medium"}, "value": "P3"},
+        ],
+        "default": "P4",
+    }
+    # High + Account → P3 (first condition matches)
+    extracted = {"ticket": {"priority": "High", "category": "Account"}}
+    result = execute_rule(rule, "text", extracted)
+    assert result.value == "P3"
+
+    # High + Network → P2 (second condition matches)
+    extracted = {"ticket": {"priority": "High", "category": "Network"}}
+    result = execute_rule(rule, "text", extracted)
+    assert result.value == "P2"
+
+    # Medium + anything → P3 (third condition)
+    extracted = {"ticket": {"priority": "Medium", "category": "Security"}}
+    result = execute_rule(rule, "text", extracted)
+    assert result.value == "P3"
+
+
+def test_conditional_rule_default():
+    rule = {
+        "path": "severity",
+        "type": "conditional",
+        "conditions": [
+            {"when": {"priority": "High"}, "value": "P2"},
+        ],
+        "default": "P4",
+    }
+    result = execute_rule(rule, "text", {"priority": "Low"})
+    assert result.value == "P4"
+
+
+def test_conditional_rule_no_default_no_match():
+    rule = {
+        "path": "severity",
+        "type": "conditional",
+        "conditions": [
+            {"when": {"priority": "High"}, "value": "P2"},
+        ],
+    }
+    result = execute_rule(rule, "text", {"priority": "Low"})
+    assert not result.matched
+
+
+def test_conditional_with_regex_pipeline():
+    """Conditional rule uses fields extracted by earlier regex rules."""
+    rules = [
+        {"path": "ticket.priority", "type": "regex", "pattern": r"Priority:\s*(\S+)\s*$"},
+        {"path": "ticket.category", "type": "regex", "pattern": r"Category:\s*(\S+)\s*$"},
+        {"path": "assessment.severity", "type": "conditional", "conditions": [
+            {"when": {"ticket.priority": "High", "ticket.category": "Account"}, "value": "P3"},
+            {"when": {"ticket.priority": "High"}, "value": "P2"},
+            {"when": {"ticket.priority": "Medium"}, "value": "P3"},
+        ], "default": "P4"},
+    ]
+    text = "Priority:     High\nCategory:     Network\n"
+    extracted, results = execute_rules(rules, text)
+    assert extracted["assessment"]["severity"] == "P2"
+
+    text = "Priority:     High\nCategory:     Account\n"
+    extracted, results = execute_rules(rules, text)
+    assert extracted["assessment"]["severity"] == "P3"
+
+
 # --- Executor tests ---
 
 def test_deep_merge_simple():
