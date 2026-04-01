@@ -21,5 +21,8 @@ def make_provider(config: dict):
             model=model,
             api_key=config.get("api_key"),
         )
+    elif provider_name == "mlx":
+        from drift.providers.mlx import MLXProvider
+        return MLXProvider(model=model)
     else:
         return OllamaProvider(model=model, base_url=config.get("base_url"))
