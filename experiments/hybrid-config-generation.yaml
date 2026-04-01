@@ -1,0 +1,10 @@
+experiment:
+  name: hybrid-config-generation
+  model: qwen2.5:32b
+  temperature: 0
+  task: config_generation
+  type: hybrid
+
+  system_prompt_file: generator_system.md
+  user_prompt_file: generator_user.md
+  hybrid_spec_file: hybrid.yaml

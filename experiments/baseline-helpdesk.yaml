@@ -1,0 +1,8 @@
+experiment:
+  name: baseline-helpdesk
+  model: qwen2.5:32b
+  temperature: 0
+  task: helpdesk_triage
+  type: baseline
+  system_prompt_file: triage_system.md
+  user_prompt_file: triage_user.md

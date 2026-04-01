@@ -471,3 +471,163 @@ Based on the literature, several architectural patterns could improve variance c
 5. **Hybrid fast-path/slow-path** — The Council of AIs found 78% of questions needed no deliberation. A pipeline could fast-track outputs with low variance and only trigger correction/deliberation when variance exceeds a threshold — balancing cost against reliability.
 
 6. **Saturation awareness** — Kim et al. find agent coordination yields highest returns below 45% single-agent accuracy. Our code review task likely exceeds this threshold, meaning the pipeline structure adds more coordination overhead than value for *this specific task*. Testing on harder tasks (where the base model struggles) should show larger benefits from pipeline structure.
+
+---
+
+## Experiment 8: Batch Rule Generalization
+
+**Date**: 2026-03-31
+
+**Goal**: Validate that auto-synthesized rules generalize beyond the single ticket used for probing. Probe one helpdesk ticket, generate rules, then test those rules against 200 different tickets (100 train / 100 test split).
+
+### Setup
+
+- **Dataset**: Console-AI/IT-helpdesk-synthetic-tickets (500 tickets, MIT license, HuggingFace)
+- **Model**: qwen2.5:32b on dedicated Ollama (single-GPU, temp=0)
+- **Pipeline**: `drift probe` (1 ticket) → `drift synthesize` → validate rules against 200 tickets
+- **Input format**: Labeled fields (Ticket ID, Subject, From, Created, Priority, Category) + free-text Description
+
+```
+  Ticket ID:    1aiu3lrqi
+  Subject:      Hey IT! Our network printer keeps disconnecting.
+  From:         jane.doe@acme.co
+  Created:      2024-10-28T18:36:55.004Z
+  Priority:     Medium
+  Category:     Network
+
+  Description:
+  Hey IT! Our network printer keeps disconnecting intermittently...
+```
+
+### Probe Results (1 ticket)
+
+The probe found 77% deterministic tokens. The synthesizer produced 7 rules from a 12-field output:
+
+| Field | Entropy | Classification |
+|-------|---------|---------------|
+| ticket.id | 0.000 | rule (regex) |
+| ticket.subject | 0.001 | rule (regex) |
+| ticket.requester_email | 0.000 | rule (regex) |
+| ticket.created_at | 0.000 | rule (regex) |
+| ticket.stated_priority | 0.000 | rule (regex) |
+| ticket.stated_category | 0.000 | rule (regex) |
+| assessment.root_cause_category | 0.001 | rule (regex) — **failed validation** |
+| assessment.severity | 0.214 | LLM required |
+| assessment.assignment_group | 0.564 | LLM required |
+| assessment.summary | 0.666 | LLM required |
+| assessment.next_steps[0] | 0.662 | LLM required |
+| assessment.next_steps[1] | 1.066 | LLM required |
+
+6 rules validated. 1 rule (`assessment.root_cause_category`) failed validation — it anchored on ticket-specific text ("Hey IT! Our") instead of a format label. 5 fields correctly classified as LLM-required (all assessment/reasoning fields).
+
+### Generated Rules
+
+```
+  ticket.id               Ticket\ ID:\s*(\S+)\s*$
+  ticket.subject           Subject:\s*(.+?)\s*$
+  ticket.requester_email   From:\s*([\w.+-]+@[\w.-]+)\s*$
+  ticket.created_at        Created:\s*(\S+)\s*$
+  ticket.stated_priority   Priority:\s*(\S+)\s*$
+  ticket.stated_category   Category:\s*(\S+)\s*$
+```
+
+All 6 patterns anchor on the input format labels (`Ticket ID:`, `Subject:`, `From:`, etc.) — not on ticket-specific values.
+
+### Generalization Results
+
+| Rule | Type | Train (100) | Test (100) | Total (200) | Status |
+|------|------|-------------|------------|-------------|--------|
+| ticket.id | regex | 100% | 100% | 100% | GENERALIZES |
+| ticket.subject | regex | 100% | 100% | 100% | GENERALIZES |
+| ticket.requester_email | regex | 100% | 100% | 100% | GENERALIZES |
+| ticket.created_at | regex | 100% | 100% | 100% | GENERALIZES |
+| ticket.stated_priority | regex | 100% | 100% | 100% | GENERALIZES |
+| ticket.stated_category | regex | 100% | 100% | 100% | GENERALIZES |
+| assessment.root_cause_category | regex | 0% | 0% | 0% | OVERFIT |
+
+**Train-test gap: 0.0%**
+
+All 6 validated rules match 100% of tickets in both the training and test sets. The overfit rule was already flagged at synthesis time (failed validation). Excluding it, the generalization rate is **6/6 = 100%**.
+
+### Why This Works
+
+The rules generalize because they anchor on **input format structure** rather than content:
+
+```
+  ┌──────────────────────────────────────────────────────────────┐
+  │  What the rules anchor on:                                    │
+  │                                                               │
+  │  "Ticket ID:    1aiu3lrqi"      →  Ticket\ ID:\s*(\S+)\s*$  │
+  │  "Ticket ID:    fs7blkcux"      →  matches ✓                 │
+  │  "Ticket ID:    l0nhq0pys"      →  matches ✓                 │
+  │                                                               │
+  │  The label "Ticket ID:" is constant across all tickets.       │
+  │  The value changes, but the regex captures any \S+ after it. │
+  │                                                               │
+  │  What the overfit rule anchored on:                           │
+  │                                                               │
+  │  "Hey IT! Our network..."       →  Hey\ IT!\ Our\s*(\S+)    │
+  │  "I'm having trouble with..."   →  NO MATCH ✗               │
+  │                                                               │
+  │  The description text varies across tickets.                  │
+  │  Rules anchored on content don't generalize.                  │
+  └──────────────────────────────────────────────────────────────┘
+```
+
+### Security Note
+
+The 6 extraction rules are **immune to prompt injection**. Even if a ticket's Description field contains adversarial text designed to manipulate an LLM, the regex rules extract metadata fields without involving the LLM. Only the 5 assessment fields (severity, root_cause, summary, next_steps, assignment_group) pass through the LLM — reducing the attack surface by 50%.
+
+### Baseline vs Hybrid Latency (10 tickets)
+
+With generalization confirmed, we ran both approaches on 10 tickets to measure actual speedup:
+
+```
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                        Pure Baseline                                    │
+  │  Input ─────────────────────────▶ LLM ─────────────────▶ Output        │
+  │                                   21.1s mean                            │
+  │  All 12 fields produced by the LLM                                     │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                     Auto Hybrid (zero human effort)                     │
+  │  Input ──┬──▶ Auto rules (6) ───▶ 6 fields ──┐                        │
+  │          │    (< 1ms)                          ├──▶ merge ──▶ Output   │
+  │          └──▶ LLM ──────────────▶ 6 fields ───┘                       │
+  │               12.8s mean                                                │
+  │  6 ticket fields via regex, 6 assessment fields via LLM                │
+  └─────────────────────────────────────────────────────────────────────────┘
+```
+
+| Ticket | Baseline (ms) | Hybrid (ms) | Speedup |
+|--------|--------------|-------------|---------|
+| 1aiu3lrqi | 26,170 | 12,697 | 51% |
+| kz5mjjpox | 23,129 | 14,233 | 38% |
+| 86eza0fwq | 19,576 | 12,343 | 37% |
+| jtw509e3n | 21,306 | 12,780 | 40% |
+| tso616mbn | 19,094 | 11,917 | 38% |
+| 6bqwkmxi1 | 18,410 | 11,091 | 40% |
+| cythbyl5p | 23,342 | 15,564 | 33% |
+| u43q44ro8 | 19,434 | 11,532 | 41% |
+| nay58n9jf | 19,872 | 12,296 | 38% |
+| 2apbmy56h | 20,302 | 13,432 | 34% |
+| **Mean** | **21,064** | **12,789** | **39%** |
+
+- **Field accuracy**: 100% for both baseline and hybrid across all 10 tickets
+- **Rules matched**: 6/6 on every ticket
+- **Speedup**: 39% mean (33-51% range)
+
+The hybrid approach is faster because the LLM prompt is shorter (only asking for assessment fields) and produces fewer output tokens. The 6 extraction rules execute in microseconds.
+
+### Key Takeaways
+
+1. **Rules generated from 1 ticket generalize to 200.** The auto-synthesis pipeline produces rules that anchor on input format labels, not content. Zero train-test gap.
+
+2. **Validation catches overfit rules at synthesis time.** The `_validate_pattern` step flagged the one bad rule before deployment. No surprises at test time.
+
+3. **The input format determines generalizability.** Labeled fields (`Key: Value`) produce perfect rules. Free-text fields (descriptions, narratives) correctly stay with the LLM.
+
+4. **39% latency reduction with zero human effort.** The hybrid approach cuts mean latency from 21.1s to 12.8s per ticket while maintaining 100% field accuracy. The LLM only handles reasoning (severity, root cause, summary, next steps); extraction is deterministic.
+
+5. **50% of output fields extracted without the LLM.** 6 of 12 fields come from regex rules. This reduces LLM cost, eliminates extraction errors on those fields, and makes them immune to prompt injection.

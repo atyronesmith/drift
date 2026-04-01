@@ -1,0 +1,96 @@
+rules:
+  - path: incident_id
+    type: regex
+    pattern: "(INC-\\d{4}-\\d{5})"
+
+  - path: reported_at
+    type: regex
+    pattern: "Reported:\\s*(.+?)\\n"
+
+  - path: reporter.name
+    type: regex
+    pattern: "Reporter:\\s*(.+?)\\s*\\("
+
+  - path: reporter.email
+    type: regex
+    pattern: "Reporter:\\s*.+?\\((.+?)\\)"
+
+  - path: account.name
+    type: regex
+    pattern: "Account:\\s*(.+?)\\s*\\("
+
+  - path: account.id
+    type: regex
+    pattern: "\\((ACCT-\\d+)\\)"
+
+  - path: account.tier
+    type: regex
+    pattern: "Tier:\\s*(.+?)\\n"
+
+  - path: sla.response
+    type: regex
+    pattern: "(\\d+)-hour response"
+
+  - path: sla.resolution
+    type: regex
+    pattern: "(\\d+)-hour resolution"
+
+  - path: affected_system.product
+    type: regex
+    pattern: "Product:\\s*(.+?)\\n"
+
+  - path: affected_system.component
+    type: regex
+    pattern: "Component:\\s*(.+?)\\n"
+
+  - path: affected_system.environment
+    type: regex
+    pattern: "Environment:\\s*(.+?)\\n"
+
+  - path: affected_system.instance
+    type: regex
+    pattern: "Instance:\\s*(.+?)\\n"
+
+  - path: timeline.incident_start
+    type: regex
+    pattern: "Starting at approximately (\\d{2}:\\d{2} UTC)"
+
+  - path: timeline.restart_attempt
+    type: regex
+    pattern: "restart the pipeline service at (\\d{2}:\\d{2} UTC)"
+
+  - path: error_indicators
+    type: regex_all
+    pattern: "(?:Buffer pool exhausted|GC pause \\d+ms)"
+
+  - path: contact.primary.name
+    type: regex
+    pattern: "Primary:\\s*(.+?),"
+
+  - path: contact.primary.phone
+    type: regex
+    pattern: "Primary:.+?\\|\\s*(.+?)\\n"
+
+  - path: contact.escalation.name
+    type: regex
+    pattern: "Escalation:\\s*(.+?),"
+
+llm_fields:
+  - severity
+  - category
+  - root_cause_analysis
+  - recommended_actions
+
+hybrid_system_prompt: |
+  You are an incident triage system. You will receive an incident report along with
+  fields that have already been extracted. Your job is to provide ONLY the analysis
+  fields as valid JSON. Do not repeat extracted fields.
+
+  For severity, use: P1 (critical/revenue-impacting), P2 (major/degraded),
+  P3 (minor/workaround available), P4 (cosmetic/informational).
+
+  Output valid JSON only with these keys:
+  - severity: object with level, justification
+  - category: incident category
+  - root_cause_analysis: object with cause, confidence, evidence, reasoning
+  - recommended_actions: object with immediate, short_term, preventive arrays
