@@ -1045,6 +1045,124 @@ def validate(engine_path: str, input_dir: str, expected_dir: str | None, fields:
     click.echo(f"\nProcessed {total - len(errors)}/{total} inputs successfully")
 
 
+@cli.command()
+@click.argument("config_path", type=click.Path(exists=True))
+@click.option("--output", "-o", required=True,
+              help="Output path for generated Python engine.")
+@click.option("--name", "engine_name", default=None,
+              help="Engine name (default: derived from output filename).")
+@click.option("--threshold", default=0.3, type=float,
+              help="Entropy threshold for rule generation (default 0.3).")
+@click.option("--input", "input_path", default=None, type=click.Path(exists=True),
+              help="Override input text with this file.")
+def build(config_path: str, output: str, engine_name: str | None,
+          threshold: float, input_path: str | None):
+    """Probe, synthesize, and compile in one step.
+
+    Takes a baseline experiment config and produces a standalone
+    Python engine. Runs the LLM once to probe, auto-generates rules,
+    and compiles everything into a single .py file.
+
+    Example:
+        drift build experiments/baseline-helpdesk.yaml -o engine.py
+    """
+    from drift.probing.logprobs import probe_with_logprobs
+    from drift.hybrid.autogen import synthesize_rules, render_hybrid_yaml, format_synthesis_report
+    from drift.hybrid.compiler import compile_engine
+
+    # Load config
+    config = yaml.safe_load(Path(config_path).read_text())
+    config = resolve_task_prompts(config, Path.cwd() / "tasks")
+    exp = config["experiment"]
+
+    if exp.get("type") == "pipeline":
+        click.echo("Error: build only supports baseline experiments.", err=True)
+        raise SystemExit(1)
+
+    # Override input if provided
+    if input_path:
+        exp["input"] = Path(input_path).read_text()
+
+    system = exp["system_prompt"]
+    prompt = exp["user_prompt"]
+    input_text = exp.get("input", "")
+    if input_text:
+        prompt = prompt.replace("{input}", input_text)
+
+    if engine_name is None:
+        engine_name = Path(output).stem
+
+    # Step 1: Probe
+    click.echo(f"Step 1/3: Probing {exp['name']} ({exp['model']})...")
+    result = probe_with_logprobs(
+        system=system,
+        prompt=prompt,
+        model=exp["model"],
+        base_url=exp.get("base_url"),
+        top_logprobs=5,
+        temperature=exp.get("temperature", 0),
+    )
+    stats = result.entropy_stats()
+    click.echo(f"  {stats['num_tokens']} tokens, "
+               f"{stats['pct_deterministic']:.0%} deterministic, "
+               f"{stats['pct_high_entropy']:.0%} high entropy")
+
+    probe_data = {
+        "model": result.model,
+        "stats": stats,
+        "tokens": [
+            {"token": t.token, "logprob": t.logprob, "entropy": t.entropy}
+            for t in result.tokens
+        ],
+    }
+
+    # Step 2: Synthesize
+    click.echo(f"\nStep 2/3: Synthesizing rules (threshold={threshold})...")
+    synth_result = synthesize_rules(probe_data, input_text, entropy_threshold=threshold)
+    click.echo(format_synthesis_report(synth_result))
+
+    # Step 3: Compile
+    click.echo(f"\nStep 3/3: Compiling engine...")
+    rules_for_compile = []
+    for rule in synth_result.rules:
+        if rule.rule_type in ("llm_required",):
+            continue
+        entry = {"path": rule.path, "type": rule.rule_type}
+        if rule.pattern:
+            entry["pattern"] = rule.pattern
+        if rule.rule_type == "literal":
+            entry["value"] = rule.value
+        if rule.rule_type == "mapping":
+            entry["source"] = rule.source
+            entry["map"] = rule.map
+            if rule.default is not None:
+                entry["default"] = rule.default
+        if rule.rule_type == "conditional":
+            entry["conditions"] = rule.conditions
+            if rule.default is not None:
+                entry["default"] = rule.default
+        rules_for_compile.append(entry)
+
+    code = compile_engine(
+        rules=rules_for_compile,
+        llm_fields=synth_result.llm_fields,
+        system_prompt=system,
+        engine_name=engine_name,
+    )
+    Path(output).write_text(code)
+
+    # Summary
+    tier1 = sum(1 for r in rules_for_compile if r["type"] in ("regex", "regex_all", "literal"))
+    tier2 = sum(1 for r in rules_for_compile if r["type"] in ("mapping", "conditional"))
+
+    click.echo(f"\nEngine written to {output}")
+    click.echo(f"  Tier 1 (regex/literal):      {tier1} fields")
+    click.echo(f"  Tier 2 (mapping/conditional): {tier2} fields")
+    click.echo(f"  Tier 3 (LLM):                {len(synth_result.llm_fields)} field groups")
+    click.echo(f"\nUsage:")
+    click.echo(f"  python {output} <input_file>")
+
+
 def _flatten_result(obj, prefix=""):
     """Flatten a nested dict to (dotted_path, value) pairs."""
     results = []
