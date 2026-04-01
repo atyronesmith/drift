@@ -20,12 +20,18 @@ from dataclasses import dataclass, field
 class GeneratedRule:
     path: str
     value: str | int | float | list | None
-    rule_type: str  # regex, literal, regex_all
+    rule_type: str  # regex, literal, regex_all, mapping, conditional
     pattern: str | None  # generated regex
     confidence: float
     entropy: float
     source_location: dict | None = None  # where in input the value was found
     validated: bool = False  # did the pattern extract the expected value?
+    # For mapping rules
+    source: str | None = None  # source field path
+    map: dict | None = None  # value mapping
+    default: str | int | float | None = None
+    # For conditional rules
+    conditions: list[dict] | None = None  # [{when: {field: val}, value: val}]
 
 
 @dataclass
@@ -389,8 +395,323 @@ def synthesize_rules(probe_data: dict, input_text: str, entropy_threshold: float
     return SynthesisResult(rules=rules, llm_fields=llm_top_level, stats=stats)
 
 
+def _parse_llm_output(probe_data: dict) -> dict | None:
+    """Parse JSON output from probe token data."""
+    tokens = probe_data["tokens"]
+    content = "".join(t["token"] for t in tokens)
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _get_nested(obj: dict, path: str):
+    """Get a value from a nested dict using dot notation."""
+    for key in path.split("."):
+        if isinstance(obj, dict):
+            obj = obj.get(key)
+        else:
+            return None
+    return obj
+
+
+def _discover_tier2_rules(
+    probes: list[tuple[dict, str]],
+    tier1_paths: set[str],
+    llm_paths: set[str],
+    all_flat_fields: list[tuple[str, list]],
+) -> list[GeneratedRule]:
+    """Discover mapping and conditional rules from multi-probe data.
+
+    For each field marked llm_required by single-probe analysis, check if
+    the output is conditionally deterministic when grouped by Tier 1 fields.
+    """
+    # Collect all parsed outputs and input texts
+    parsed_outputs = []
+    for probe_data, input_text in probes:
+        parsed = _parse_llm_output(probe_data)
+        if parsed:
+            parsed_outputs.append(parsed)
+
+    if len(parsed_outputs) < 3:
+        return []
+
+    # Collect all values for each field across probes
+    field_values = {}
+    for path, _ in all_flat_fields:
+        vals = []
+        for parsed in parsed_outputs:
+            v = _get_nested(parsed, path)
+            vals.append(v)
+        field_values[path] = vals
+
+    # Only analyze fields that are in llm_paths (high entropy per single probe)
+    # but might be conditionally deterministic
+    tier2_rules = []
+
+    for path in llm_paths:
+        values = field_values.get(path, [])
+        if not values or all(v is None for v in values):
+            continue
+
+        # Try each Tier 1 field as a potential source for mapping
+        best_rule = _find_best_mapping(path, values, tier1_paths, field_values, parsed_outputs)
+        if best_rule:
+            tier2_rules.append(best_rule)
+
+    return tier2_rules
+
+
+def _find_best_mapping(
+    target_path: str,
+    target_values: list,
+    tier1_paths: set[str],
+    field_values: dict[str, list],
+    parsed_outputs: list[dict],
+) -> GeneratedRule | None:
+    """Find the best mapping or conditional rule for a target field.
+
+    Tries single-source mappings first, then multi-source conditionals.
+    """
+    n = len(target_values)
+
+    # Try single-source mappings (simplest)
+    best_source = None
+    best_accuracy = 0.0
+    best_mapping = None
+
+    for source_path in tier1_paths:
+        source_values = field_values.get(source_path, [])
+        if len(source_values) != n:
+            continue
+
+        # Group target values by source value
+        groups = {}
+        for sv, tv in zip(source_values, target_values):
+            if sv is None or tv is None:
+                continue
+            sk = str(sv)
+            if sk not in groups:
+                groups[sk] = []
+            groups[sk].append(tv)
+
+        if not groups:
+            continue
+
+        # Check consistency within each group
+        mapping = {}
+        consistent = 0
+        total = 0
+        for source_val, target_vals in groups.items():
+            total += len(target_vals)
+            unique = set(str(v) for v in target_vals)
+            if len(unique) == 1:
+                consistent += len(target_vals)
+                mapping[source_val] = target_vals[0]
+
+        if total == 0:
+            continue
+
+        accuracy = consistent / total
+        if accuracy > best_accuracy:
+            best_accuracy = accuracy
+            best_source = source_path
+            best_mapping = mapping
+
+    # Need at least 80% accuracy for a mapping rule
+    if best_accuracy >= 0.8 and best_mapping:
+        # Determine default: most common value not in mapping
+        all_target = [str(v) for v in target_values if v is not None]
+        mapped_source_vals = set(best_mapping.keys())
+        unmapped_targets = []
+        source_values = field_values.get(best_source, [])
+        for sv, tv in zip(source_values, target_values):
+            if sv is not None and str(sv) not in mapped_source_vals and tv is not None:
+                unmapped_targets.append(tv)
+
+        default = None
+        if unmapped_targets:
+            from collections import Counter
+            default = Counter(str(v) for v in unmapped_targets).most_common(1)[0][0]
+
+        return GeneratedRule(
+            path=target_path,
+            value=None,
+            rule_type="mapping",
+            pattern=None,
+            confidence=round(best_accuracy, 3),
+            entropy=0.0,
+            validated=True,
+            source=best_source,
+            map=best_mapping,
+            default=default,
+        )
+
+    # Try multi-source conditional (two sources combined)
+    best_cond = _find_conditional(target_path, target_values, tier1_paths, field_values)
+    if best_cond:
+        return best_cond
+
+    return None
+
+
+def _find_conditional(
+    target_path: str,
+    target_values: list,
+    tier1_paths: set[str],
+    field_values: dict[str, list],
+) -> GeneratedRule | None:
+    """Find a conditional rule using combinations of source fields."""
+    from itertools import combinations
+
+    n = len(target_values)
+    source_paths = [p for p in tier1_paths if len(field_values.get(p, [])) == n]
+
+    # Try pairs of source fields
+    for s1, s2 in combinations(source_paths, 2):
+        vals1 = field_values[s1]
+        vals2 = field_values[s2]
+
+        groups = {}
+        for v1, v2, tv in zip(vals1, vals2, target_values):
+            if v1 is None or v2 is None or tv is None:
+                continue
+            key = (str(v1), str(v2))
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(tv)
+
+        if not groups:
+            continue
+
+        consistent = 0
+        total = 0
+        conditions = []
+        for (sv1, sv2), tvs in groups.items():
+            total += len(tvs)
+            unique = set(str(v) for v in tvs)
+            if len(unique) == 1:
+                consistent += len(tvs)
+                conditions.append({
+                    "when": {s1: sv1, s2: sv2},
+                    "value": tvs[0],
+                })
+
+        if total == 0:
+            continue
+
+        accuracy = consistent / total
+        if accuracy >= 0.8 and conditions:
+            # Default: most common unmapped value
+            default = None
+            all_target = [str(v) for v in target_values if v is not None]
+            if all_target:
+                from collections import Counter
+                default = Counter(all_target).most_common(1)[0][0]
+
+            return GeneratedRule(
+                path=target_path,
+                value=None,
+                rule_type="conditional",
+                pattern=None,
+                confidence=round(accuracy, 3),
+                entropy=0.0,
+                validated=True,
+                conditions=conditions,
+                default=default,
+            )
+
+    return None
+
+
+def synthesize_rules_multi(
+    probes: list[tuple[dict, str]],
+    entropy_threshold: float = 0.3,
+) -> SynthesisResult:
+    """Auto-generate hybrid rules from multiple probes.
+
+    Extends single-probe synthesis with Tier 2 discovery:
+    1. Run single-probe synthesis on first probe to get Tier 1 rules
+    2. Parse outputs from all probes
+    3. For fields marked llm_required, check conditional determinism
+    4. Emit mapping/conditional rules for Tier 2 fields
+
+    Args:
+        probes: List of (probe_data, input_text) pairs
+        entropy_threshold: Fields below this are rule candidates
+    """
+    if not probes:
+        return SynthesisResult(rules=[], llm_fields=[], stats={
+            "total_fields": 0, "rule_candidates": 0, "rules_generated": 0,
+            "rules_validated": 0, "llm_required": 0, "probes_used": 0,
+        })
+
+    # Step 1: Single-probe synthesis for Tier 1 rules (use first probe)
+    base_result = synthesize_rules(probes[0][0], probes[0][1], entropy_threshold)
+
+    tier1_paths = {r.path for r in base_result.rules if r.rule_type not in ("llm_required",)}
+    llm_paths = {r.path for r in base_result.rules if r.rule_type == "llm_required"}
+
+    if len(probes) < 3 or not llm_paths:
+        # Not enough probes for Tier 2 discovery, return single-probe result
+        base_result.stats["probes_used"] = len(probes)
+        return base_result
+
+    # Step 2: Collect all flat fields from first probe for field enumeration
+    parsed_first = _parse_llm_output(probes[0][0])
+    all_flat_fields = _flatten_json(parsed_first) if parsed_first else []
+
+    # Step 3: Discover Tier 2 rules
+    tier2_rules = _discover_tier2_rules(probes, tier1_paths, llm_paths, all_flat_fields)
+
+    # Step 4: Merge results — replace llm_required rules with Tier 2 where found
+    tier2_paths = {r.path for r in tier2_rules}
+    final_rules = [r for r in base_result.rules if r.path not in tier2_paths]
+    final_rules.extend(tier2_rules)
+
+    # Update llm_fields — remove paths that are now Tier 2
+    remaining_llm = [r.path for r in final_rules if r.rule_type == "llm_required"]
+    llm_top_level = []
+    seen = set()
+    for f in remaining_llm:
+        top = f.split(".")[0].split("[")[0]
+        if top not in seen:
+            llm_top_level.append(top)
+            seen.add(top)
+
+    # Also keep any top-level LLM fields from base that aren't fully covered
+    for f in base_result.llm_fields:
+        if f not in seen:
+            # Check if any sub-fields under this top-level are still llm_required
+            has_llm_subfield = any(
+                r.path.startswith(f + ".") or r.path == f
+                for r in final_rules if r.rule_type == "llm_required"
+            )
+            if has_llm_subfield and f not in seen:
+                llm_top_level.append(f)
+                seen.add(f)
+
+    stats = dict(base_result.stats)
+    stats["probes_used"] = len(probes)
+    stats["tier2_discovered"] = len(tier2_rules)
+    stats["tier2_types"] = {r.rule_type: 0 for r in tier2_rules}
+    for r in tier2_rules:
+        stats["tier2_types"][r.rule_type] += 1
+
+    return SynthesisResult(rules=final_rules, llm_fields=llm_top_level, stats=stats)
+
+
 def render_hybrid_yaml(result: SynthesisResult) -> str:
     """Render a SynthesisResult as a hybrid.yaml string."""
+    import yaml as pyyaml
+
     lines = ["# Auto-generated by: drift synthesize", "# Edit as needed.", ""]
     lines.append("rules:")
 
@@ -400,20 +721,30 @@ def render_hybrid_yaml(result: SynthesisResult) -> str:
 
         lines.append(f"  - path: {rule.path}")
         lines.append(f"    type: {rule.rule_type}")
-        if rule.pattern:
-            # Use YAML's own serialization for correct escaping
-            import yaml as pyyaml
+
+        if rule.rule_type == "mapping":
+            lines.append(f"    source: {rule.source}")
+            map_str = pyyaml.dump(rule.map, default_flow_style=True).strip()
+            lines.append(f"    map: {map_str}")
+            if rule.default is not None:
+                lines.append(f"    default: {_yaml_scalar(rule.default)}")
+        elif rule.rule_type == "conditional":
+            lines.append("    conditions:")
+            for cond in (rule.conditions or []):
+                when = cond["when"]
+                when_str = pyyaml.dump(when, default_flow_style=True).strip()
+                lines.append(f"      - when: {when_str}")
+                lines.append(f"        value: {_yaml_scalar(cond['value'])}")
+            if rule.default is not None:
+                lines.append(f"    default: {_yaml_scalar(rule.default)}")
+        elif rule.pattern:
             yaml_str = pyyaml.dump(rule.pattern, default_style='"').strip()
             lines.append(f"    pattern: {yaml_str}")
         elif rule.rule_type == "literal":
-            val = rule.value
-            if isinstance(val, str):
-                lines.append(f'    value: "{val}"')
-            else:
-                lines.append(f"    value: {val}")
+            lines.append(f"    value: {_yaml_scalar(rule.value)}")
 
         status = "validated" if rule.validated else "UNVALIDATED"
-        lines.append(f"    # entropy={rule.entropy:.3f} confidence={rule.confidence:.0%} [{status}]")
+        lines.append(f"    # confidence={rule.confidence:.0%} [{status}]")
         lines.append("")
 
     lines.append("llm_fields:")
@@ -424,6 +755,13 @@ def render_hybrid_yaml(result: SynthesisResult) -> str:
     lines.append("output_mode: merge")
 
     return "\n".join(lines)
+
+
+def _yaml_scalar(val) -> str:
+    """Format a value for inline YAML."""
+    if isinstance(val, str):
+        return f'"{val}"'
+    return str(val)
 
 
 def format_synthesis_report(result: SynthesisResult) -> str:
@@ -438,17 +776,22 @@ def format_synthesis_report(result: SynthesisResult) -> str:
     lines.append(f"  Rules generated:          {s['rules_generated']}")
     lines.append(f"  Rules validated:           {s['rules_validated']}")
     lines.append(f"  LLM required:             {s['llm_required']}")
+    if "probes_used" in s:
+        lines.append(f"  Probes used:              {s['probes_used']}")
+    if "tier2_discovered" in s:
+        lines.append(f"  Tier 2 discovered:        {s['tier2_discovered']}")
     if s['total_fields'] > 0:
-        pct = s['rules_validated'] / s['total_fields'] * 100
+        total_rules = len([r for r in result.rules if r.rule_type not in ("llm_required",)])
+        pct = total_rules / s['total_fields'] * 100
         lines.append(f"  Automation rate:          {pct:.0f}%")
     lines.append("")
 
-    # Show generated rules
-    gen_rules = [r for r in result.rules if r.rule_type not in ("llm_required",)]
-    if gen_rules:
-        lines.append("  GENERATED RULES:")
+    # Show Tier 1 rules
+    tier1_rules = [r for r in result.rules if r.rule_type in ("regex", "regex_all", "literal")]
+    if tier1_rules:
+        lines.append("  TIER 1 RULES (regex/literal):")
         lines.append("  " + "-" * 66)
-        for r in gen_rules:
+        for r in tier1_rules:
             status = "OK" if r.validated else "FAIL"
             val_str = repr(r.value)[:35]
             if r.pattern:
@@ -457,6 +800,27 @@ def format_synthesis_report(result: SynthesisResult) -> str:
                 lines.append(f"          value:   {val_str}")
             else:
                 lines.append(f"  [{status:4}] {r.path:<35} {r.rule_type:<8} = {val_str}")
+            lines.append("")
+
+    # Show Tier 2 rules
+    tier2_rules = [r for r in result.rules if r.rule_type in ("mapping", "conditional")]
+    if tier2_rules:
+        lines.append("  TIER 2 RULES (mapping/conditional):")
+        lines.append("  " + "-" * 66)
+        for r in tier2_rules:
+            status = "OK" if r.validated else "FAIL"
+            if r.rule_type == "mapping":
+                lines.append(f"  [{status:4}] {r.path:<35} mapping    confidence={r.confidence:.0%}")
+                lines.append(f"          source: {r.source}")
+                lines.append(f"          map: {r.map}")
+                if r.default is not None:
+                    lines.append(f"          default: {r.default}")
+            elif r.rule_type == "conditional":
+                lines.append(f"  [{status:4}] {r.path:<35} conditional confidence={r.confidence:.0%}")
+                for cond in (r.conditions or []):
+                    lines.append(f"          when {cond['when']} → {cond['value']}")
+                if r.default is not None:
+                    lines.append(f"          default: {r.default}")
             lines.append("")
 
     # Show LLM-required fields
