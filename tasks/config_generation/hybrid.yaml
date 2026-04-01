@@ -1,0 +1,108 @@
+rules:
+  - path: service_name
+    type: regex
+    pattern: "deploy the (\\S+)"
+
+  - path: version
+    type: regex
+    pattern: "\\((v[\\d.]+)\\)"
+
+  - path: replicas
+    type: regex
+    pattern: "(\\d+) replicas for high availability"
+
+  - path: resources.requests.memory
+    type: regex
+    pattern: "(\\d+MB|\\d+Mi) memory.+minimum"
+
+  - path: resources.requests.cpu
+    type: regex
+    pattern: "and (\\d+m) CPU minimum"
+
+  - path: resources.limits.memory
+    type: regex
+    pattern: "limits of (\\d+GB|\\d+Gi) memory"
+
+  - path: resources.limits.cpu
+    type: regex
+    pattern: "and (\\d+m) CPU$"
+
+  - path: ports.http
+    type: regex
+    pattern: "port (\\d+) for HTTP"
+
+  - path: ports.grpc
+    type: regex
+    pattern: "(\\d+) for gRPC"
+
+  - path: health.path
+    type: regex
+    pattern: "Health check endpoint is (\\S+)"
+
+  - path: health.port
+    type: regex
+    pattern: "Health check endpoint is \\S+ on port (\\d+)"
+
+  - path: readiness.path
+    type: regex
+    pattern: "Readiness check is (\\S+)"
+
+  - path: readiness.initial_delay
+    type: regex
+    pattern: "wait (\\d+) seconds"
+
+  - path: container_image
+    type: regex
+    pattern: "Container image:\\s*(\\S+)"
+
+  - path: hpa.min
+    type: regex
+    pattern: "scales between (\\d+) and"
+
+  - path: hpa.max
+    type: regex
+    pattern: "and (\\d+) replicas based on"
+
+  - path: hpa.cpu_target
+    type: regex
+    pattern: "CPU utilization at (\\d+)%"
+
+  - path: labels.team
+    type: regex
+    pattern: "team=(\\w+)"
+
+  - path: labels.service
+    type: regex
+    pattern: "service=(\\S+)"
+
+  - path: labels.environment
+    type: regex
+    pattern: "environment=(\\w+)"
+
+  - path: network_policy.allowed_namespaces
+    type: regex_all
+    pattern: "from (?:the )?namespace\\s+\"(\\S+?)\""
+
+output_mode: llm_passthrough
+
+llm_fields:
+  - kubernetes_manifests
+
+hybrid_system_prompt: |
+  You are a Kubernetes manifest generator. Given infrastructure requirements,
+  produce valid Kubernetes YAML manifests. Output valid YAML only, with no
+  commentary. Separate multiple resources with the standard `---` document
+  separator. Use current stable API versions. Follow Kubernetes best practices
+  for production deployments.
+
+  The following values have already been extracted from the request and MUST
+  be used exactly as shown:
+  {extracted_fields}
+
+  Generate all required manifests (Deployment, Service, HPA, PDB, NetworkPolicy)
+  using these exact values.
+
+hybrid_prompt_template: |
+  Generate all Kubernetes manifests for this deployment request.
+
+  {input}

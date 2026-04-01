@@ -1,0 +1,8 @@
+experiment:
+  name: baseline-incident-triage
+  model: qwen2.5:32b
+  temperature: 0
+  task: incident_triage
+
+  system_prompt_file: triage_system.md
+  user_prompt_file: triage_user.md

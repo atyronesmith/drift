@@ -92,6 +92,73 @@ async def _run_pipeline(config: dict, num_runs: int, output_dir: str) -> Path:
     return run_dir
 
 
+async def _run_hybrid(config: dict, num_runs: int, output_dir: str) -> Path:
+    """Run a hybrid (rules + LLM) experiment num_runs times."""
+    from drift.hybrid.executor import run_hybrid, build_hybrid_prompt
+
+    exp = config["experiment"]
+    spec = exp["hybrid_spec"]
+    provider = make_provider(exp)
+
+    rules = spec["rules"]
+    llm_fields = spec["llm_fields"]
+    system = spec.get("hybrid_system_prompt", exp.get("system_prompt", ""))
+    input_text = exp.get("input", "")
+    hybrid_prompt_tpl = spec.get("hybrid_prompt_template")
+
+    run_dir = make_run_dir(output_dir, exp["name"])
+
+    click.echo(f"Experiment: {exp['name']}")
+    click.echo(f"Type: hybrid ({len(rules)} rules + LLM for {len(llm_fields)} fields)")
+    click.echo(f"Model: {exp['model']}")
+    click.echo(f"Runs: {num_runs}")
+    click.echo(f"Output: {run_dir}")
+    click.echo()
+
+    for i in range(num_runs):
+        click.echo(f"  Run {i + 1}/{num_runs}...", nl=False)
+        output_mode = spec.get("output_mode", "merge")
+        hybrid_result = await run_hybrid(
+            provider=provider,
+            system_prompt=system,
+            input_text=input_text,
+            rules=rules,
+            llm_fields=llm_fields,
+            hybrid_prompt_template=hybrid_prompt_tpl,
+            temperature=exp.get("temperature", 0),
+            output_mode=output_mode,
+        )
+        resp = hybrid_result.response
+        if output_mode == "llm_passthrough":
+            content = hybrid_result.raw_llm_response
+        else:
+            content = json.dumps(hybrid_result.merged, indent=2)
+        result = {
+            "run_index": i,
+            "type": "hybrid",
+            "response": {
+                "content": content,
+                "model": resp.model if resp else exp["model"],
+                "provider": resp.provider if resp else exp.get("provider", "ollama"),
+                "total_ms": resp.total_ms if resp else 0,
+            },
+            "hybrid": {
+                "rules_applied": hybrid_result.rules_applied,
+                "rules_matched": hybrid_result.rules_matched,
+                "extracted": hybrid_result.extracted,
+                "llm_output": hybrid_result.llm_output,
+                "raw_llm_response": hybrid_result.raw_llm_response,
+            },
+            "config": exp,
+        }
+        save_run(run_dir, i, result)
+        ms = f" {resp.total_ms:.0f}ms" if resp else ""
+        click.echo(f" rules={hybrid_result.rules_matched}/{hybrid_result.rules_applied}{ms}")
+
+    click.echo(f"\nDone. Results saved to {run_dir}")
+    return run_dir
+
+
 @click.group()
 def cli():
     """Drift — measure LLM output variability."""
@@ -109,6 +176,8 @@ def run(config_path: str, runs: int, output_dir: str):
     exp_type = config["experiment"].get("type", "baseline")
     if exp_type == "pipeline":
         asyncio.run(_run_pipeline(config, runs, output_dir))
+    elif exp_type == "hybrid":
+        asyncio.run(_run_hybrid(config, runs, output_dir))
     else:
         asyncio.run(_run_baseline(config, runs, output_dir))
 
@@ -160,12 +229,15 @@ def _compute_metrics(
         metrics = _measure_pipeline(runs)
     else:
         metrics = _measure_baseline(runs)
+        if run_type == "hybrid":
+            metrics["type"] = "hybrid"
+            metrics["hybrid"] = _measure_hybrid(runs)
 
     if functional_step and run_type == "pipeline":
         func_metrics = _measure_functional(runs, functional_step, tasks_dir, functional_tests_path)
         if func_metrics:
             metrics["functional"] = func_metrics
-    elif run_type == "baseline":
+    elif run_type in ("baseline", "hybrid"):
         func_metrics = _measure_functional_baseline(runs, tasks_dir, functional_tests_path)
         if func_metrics:
             metrics["functional"] = func_metrics
@@ -432,6 +504,18 @@ def _measure_baseline(runs: list[dict]) -> dict:
     return metrics
 
 
+def _measure_hybrid(runs: list[dict]) -> dict:
+    """Compute hybrid-specific metrics."""
+    hybrid_data = [r.get("hybrid", {}) for r in runs]
+    rules_applied = hybrid_data[0].get("rules_applied", 0) if hybrid_data else 0
+    rules_matched = [h.get("rules_matched", 0) for h in hybrid_data]
+    return {
+        "rules_applied": rules_applied,
+        "mean_rules_matched": round(sum(rules_matched) / len(rules_matched), 1),
+        "rule_match_rate": round(sum(rules_matched) / (len(rules_matched) * rules_applied), 3) if rules_applied else 0,
+    }
+
+
 def _measure_pipeline(runs: list[dict]) -> dict:
     num_steps = len(runs[0]["steps"])
     step_names = [s["name"] for s in runs[0]["steps"]]
@@ -603,7 +687,9 @@ def _get_final_outputs(runs: list[dict]) -> list[str]:
 @click.option("--output", "-o", default=None, help="Save probe results to JSON.")
 @click.option("--top-logprobs", default=5, help="Number of top alternatives per token.")
 @click.option("--rules", is_flag=True, help="Run rule extraction analysis on JSON output.")
-def probe(config_path: str, output: str | None, top_logprobs: int, rules: bool):
+@click.option("--input", "input_path", default=None, type=click.Path(exists=True),
+              help="Override input text with this file (for batch experiments).")
+def probe(config_path: str, output: str | None, top_logprobs: int, rules: bool, input_path: str | None):
     """Probe token-level confidence for a baseline experiment.
 
     Runs the experiment once with logprobs enabled and analyzes
@@ -614,6 +700,10 @@ def probe(config_path: str, output: str | None, top_logprobs: int, rules: bool):
     config = yaml.safe_load(Path(config_path).read_text())
     config = resolve_task_prompts(config, Path.cwd() / "tasks")
     exp = config["experiment"]
+
+    # Override input if provided
+    if input_path:
+        exp["input"] = Path(input_path).read_text()
 
     if exp.get("type") == "pipeline":
         click.echo("Error: probe only supports baseline experiments.", err=True)
@@ -698,6 +788,39 @@ def probe(config_path: str, output: str | None, top_logprobs: int, rules: bool):
     if output:
         Path(output).write_text(json.dumps(probe_data, indent=2))
         click.echo(f"\nProbe data saved to {output}")
+
+
+@cli.command()
+@click.argument("probe_path", type=click.Path(exists=True))
+@click.option("--input", "input_path", required=True, type=click.Path(exists=True),
+              help="Original input text file (e.g., tasks/incident_triage/input.md).")
+@click.option("--output", "-o", default=None,
+              help="Write generated hybrid.yaml to this path.")
+@click.option("--threshold", default=0.3, type=float,
+              help="Entropy threshold: fields below this become rules (default 0.3).")
+def synthesize(probe_path: str, input_path: str, output: str | None, threshold: float):
+    """Auto-generate hybrid rules from probe data.
+
+    Takes probe results (from `drift probe -o`) and the original input,
+    traces deterministic output values back to their source in the input,
+    and generates regex extraction rules automatically.
+
+    Example:
+        drift probe experiments/baseline.yaml -o probe.json
+        drift synthesize probe.json --input tasks/my_task/input.md -o tasks/my_task/hybrid.yaml
+    """
+    from drift.hybrid.autogen import synthesize_rules, render_hybrid_yaml, format_synthesis_report
+
+    probe_data = json.loads(Path(probe_path).read_text())
+    input_text = Path(input_path).read_text()
+
+    result = synthesize_rules(probe_data, input_text, entropy_threshold=threshold)
+    click.echo(format_synthesis_report(result))
+
+    if output:
+        yaml_content = render_hybrid_yaml(result)
+        Path(output).write_text(yaml_content)
+        click.echo(f"\nHybrid spec written to {output}")
 
 
 if __name__ == "__main__":

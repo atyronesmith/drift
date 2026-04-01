@@ -34,6 +34,14 @@ def resolve_task_prompts(config: dict, tasks_dir: Path) -> dict:
             for inner_step in step.get("steps", []):
                 _resolve_prompt_fields(inner_step, task_dir)
 
+    # Resolve hybrid spec file
+    if "hybrid_spec_file" in exp and "hybrid_spec" not in exp:
+        import yaml
+        spec_path = (task_dir or Path.cwd()) / exp["hybrid_spec_file"]
+        if spec_path.exists():
+            exp["hybrid_spec"] = yaml.safe_load(spec_path.read_text())
+            del exp["hybrid_spec_file"]
+
     return config
 
 
