@@ -3,7 +3,11 @@
 import json
 import re
 import textwrap
+from pathlib import Path
 
+from click.testing import CliRunner
+
+from drift.cli import cli
 from drift.hybrid.compiler import compile_engine
 
 
@@ -99,3 +103,78 @@ def test_compiled_engine_no_llm_fields():
     assert "_call_llm" not in code
     assert "_parse_json" not in code
     assert "_merge" not in code
+
+
+def test_validate_command(tmp_path):
+    """drift validate runs an engine against input files and reports extraction rates."""
+    # Generate engine
+    code = compile_engine(SAMPLE_RULES, [], "You are a bot.", "test_engine")
+    engine_file = tmp_path / "engine.py"
+    engine_file.write_text(code)
+
+    # Create input files
+    input_dir = tmp_path / "inputs"
+    input_dir.mkdir()
+    (input_dir / "t1.txt").write_text("ID: ABC-123\nPriority: Medium\nDesc: something")
+    (input_dir / "t2.txt").write_text("ID: XYZ-999\nPriority: High\nDesc: urgent")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["validate", str(engine_file), "--input-dir", str(input_dir)])
+
+    assert result.exit_code == 0
+    assert "Processed 2/2 inputs successfully" in result.output
+    assert "100%" in result.output
+
+
+def test_validate_with_expected(tmp_path):
+    """drift validate compares against expected outputs when provided."""
+    code = compile_engine(SAMPLE_RULES, [], "You are a bot.", "test_engine")
+    engine_file = tmp_path / "engine.py"
+    engine_file.write_text(code)
+
+    input_dir = tmp_path / "inputs"
+    input_dir.mkdir()
+    (input_dir / "t1.txt").write_text("ID: ABC-123\nPriority: Medium\nDesc: something")
+
+    expected_dir = tmp_path / "expected"
+    expected_dir.mkdir()
+    (expected_dir / "t1.json").write_text(json.dumps({
+        "ticket": {"id": "ABC-123", "priority": "Medium"},
+        "status": "open",
+        "severity": "P3",
+        "score": 5,
+    }))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "validate", str(engine_file),
+        "--input-dir", str(input_dir),
+        "--expected-dir", str(expected_dir),
+    ])
+
+    assert result.exit_code == 0
+    assert "Accuracy" in result.output
+
+
+def test_validate_field_filter(tmp_path):
+    """drift validate --fields filters which fields are reported."""
+    code = compile_engine(SAMPLE_RULES, [], "You are a bot.", "test_engine")
+    engine_file = tmp_path / "engine.py"
+    engine_file.write_text(code)
+
+    input_dir = tmp_path / "inputs"
+    input_dir.mkdir()
+    (input_dir / "t1.txt").write_text("ID: ABC-123\nPriority: High\nDesc: x")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "validate", str(engine_file),
+        "--input-dir", str(input_dir),
+        "--fields", "ticket.id,severity",
+    ])
+
+    assert result.exit_code == 0
+    assert "ticket.id" in result.output
+    assert "severity" in result.output
+    # score and status should not appear since they weren't in --fields
+    assert "score" not in result.output

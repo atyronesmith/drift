@@ -912,5 +912,153 @@ def compile(spec_path: str, prompt_path: str, output: str, engine_name: str | No
     click.echo(f"  from {engine_name} import process          # Import in your code")
 
 
+@cli.command()
+@click.argument("engine_path", type=click.Path(exists=True))
+@click.option("--input-dir", required=True, type=click.Path(exists=True),
+              help="Directory of input text files to validate against.")
+@click.option("--expected-dir", default=None, type=click.Path(exists=True),
+              help="Directory of expected JSON outputs (optional, for accuracy check).")
+@click.option("--fields", default=None,
+              help="Comma-separated list of dot-path fields to check (default: all).")
+def validate(engine_path: str, input_dir: str, expected_dir: str | None, fields: str | None):
+    """Validate a compiled engine against input files.
+
+    Loads the engine, runs process() on each input file, and reports
+    field extraction rates. Optionally compares against expected outputs.
+
+    Example:
+        drift validate engine.py --input-dir tickets/
+        drift validate engine.py --input-dir tickets/ --expected-dir expected/
+    """
+    import importlib.util
+
+    # Load the engine module
+    spec = importlib.util.spec_from_file_location("engine", engine_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    if not hasattr(module, "process"):
+        click.echo(f"Error: {engine_path} has no process() function", err=True)
+        raise SystemExit(1)
+
+    # Collect input files
+    input_path = Path(input_dir)
+    input_files = sorted(
+        input_path.glob("*.txt")
+    ) or sorted(
+        input_path.glob("*.md")
+    )
+
+    if not input_files:
+        click.echo(f"Error: no .txt or .md files in {input_dir}", err=True)
+        raise SystemExit(1)
+
+    # Load expected outputs if provided
+    expected_map = {}
+    if expected_dir:
+        for ef in Path(expected_dir).glob("*.json"):
+            expected_map[ef.stem] = json.loads(ef.read_text())
+
+    # Parse field filter
+    check_fields = [f.strip() for f in fields.split(",")] if fields else None
+
+    # Run validation
+    click.echo(f"Engine:  {engine_path}")
+    click.echo(f"Inputs:  {len(input_files)} files")
+    if expected_map:
+        click.echo(f"Expected: {len(expected_map)} files")
+    click.echo()
+
+    field_hits = {}  # path -> count of non-None extractions
+    field_total = {}  # path -> total attempts
+    field_correct = {}  # path -> count matching expected
+    errors = []
+    total = len(input_files)
+
+    for input_file in input_files:
+        input_text = input_file.read_text()
+        try:
+            result = module.process(input_text)
+        except Exception as e:
+            errors.append((input_file.name, str(e)))
+            continue
+
+        # Flatten result to check fields
+        flat = _flatten_result(result)
+
+        for path, value in flat:
+            if check_fields and path not in check_fields:
+                continue
+            field_total[path] = field_total.get(path, 0) + 1
+            if value is not None:
+                field_hits[path] = field_hits.get(path, 0) + 1
+
+        # Compare against expected if available
+        stem = input_file.stem
+        if stem in expected_map:
+            expected_flat = dict(_flatten_result(expected_map[stem]))
+            for path, value in flat:
+                if check_fields and path not in check_fields:
+                    continue
+                if path in expected_flat and value == expected_flat[path]:
+                    field_correct[path] = field_correct.get(path, 0) + 1
+
+    # Report
+    click.echo(f"{'Field':<40} {'Extracted':>10} {'Rate':>8}", nl=True)
+    click.echo(f"{'-'*40} {'-'*10} {'-'*8}")
+
+    all_paths = sorted(field_total.keys())
+    for path in all_paths:
+        hits = field_hits.get(path, 0)
+        tot = field_total[path]
+        rate = hits / tot * 100 if tot > 0 else 0
+        click.echo(f"{path:<40} {hits:>5}/{tot:<4} {rate:>6.0f}%")
+
+    extracted_total = sum(field_hits.values())
+    attempted_total = sum(field_total.values())
+    overall_rate = extracted_total / attempted_total * 100 if attempted_total > 0 else 0
+    click.echo(f"\nOverall extraction rate: {extracted_total}/{attempted_total} ({overall_rate:.0f}%)")
+
+    if expected_map:
+        click.echo(f"\n{'Field':<40} {'Correct':>10} {'Accuracy':>10}")
+        click.echo(f"{'-'*40} {'-'*10} {'-'*10}")
+        for path in all_paths:
+            if path in field_correct:
+                correct = field_correct[path]
+                tot = min(field_total[path], len(expected_map))
+                acc = correct / tot * 100 if tot > 0 else 0
+                click.echo(f"{path:<40} {correct:>5}/{tot:<4} {acc:>8.0f}%")
+
+        correct_total = sum(field_correct.values())
+        expected_total = sum(
+            min(field_total.get(p, 0), len(expected_map))
+            for p in field_correct
+        )
+        overall_acc = correct_total / expected_total * 100 if expected_total > 0 else 0
+        click.echo(f"\nOverall accuracy: {correct_total}/{expected_total} ({overall_acc:.0f}%)")
+
+    if errors:
+        click.echo(f"\nErrors ({len(errors)}/{total}):")
+        for name, err in errors[:10]:
+            click.echo(f"  {name}: {err}")
+
+    click.echo(f"\nProcessed {total - len(errors)}/{total} inputs successfully")
+
+
+def _flatten_result(obj, prefix=""):
+    """Flatten a nested dict to (dotted_path, value) pairs."""
+    results = []
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            new_prefix = f"{prefix}.{key}" if prefix else key
+            results.extend(_flatten_result(val, new_prefix))
+    elif isinstance(obj, list):
+        for i, val in enumerate(obj):
+            results.append((f"{prefix}[{i}]", val))
+    else:
+        results.append((prefix, obj))
+    return results
+
+
 if __name__ == "__main__":
     cli()
