@@ -823,5 +823,57 @@ def synthesize(probe_path: str, input_path: str, output: str | None, threshold: 
         click.echo(f"\nHybrid spec written to {output}")
 
 
+@cli.command()
+@click.argument("spec_path", type=click.Path(exists=True))
+@click.option("--prompt", "prompt_path", required=True, type=click.Path(exists=True),
+              help="System prompt file for LLM calls.")
+@click.option("--output", "-o", required=True,
+              help="Output path for generated Python engine.")
+@click.option("--name", "engine_name", default=None,
+              help="Engine name (default: derived from output filename).")
+def compile(spec_path: str, prompt_path: str, output: str, engine_name: str | None):
+    """Compile a hybrid spec into a standalone Python engine.
+
+    Takes a hybrid.yaml (from drift synthesize) and a system prompt,
+    and generates a self-contained Python module.
+
+    Example:
+        drift compile tasks/helpdesk_triage/hybrid_auto.yaml \\
+            --prompt tasks/helpdesk_triage/triage_system.md \\
+            -o engine.py
+    """
+    from drift.hybrid.compiler import compile_engine
+
+    spec = yaml.safe_load(Path(spec_path).read_text())
+    system_prompt = Path(prompt_path).read_text()
+
+    rules = spec.get("rules", [])
+    llm_fields = spec.get("llm_fields", [])
+
+    if engine_name is None:
+        engine_name = Path(output).stem
+
+    code = compile_engine(
+        rules=rules,
+        llm_fields=llm_fields,
+        system_prompt=system_prompt,
+        engine_name=engine_name,
+    )
+
+    Path(output).write_text(code)
+
+    # Count tiers
+    tier1 = sum(1 for r in rules if r["type"] in ("regex", "regex_all", "literal"))
+    tier2 = sum(1 for r in rules if r["type"] in ("mapping", "conditional"))
+
+    click.echo(f"Compiled engine: {output}")
+    click.echo(f"  Tier 1 (regex/literal):      {tier1} fields")
+    click.echo(f"  Tier 2 (mapping/conditional): {tier2} fields")
+    click.echo(f"  Tier 3 (LLM):                {len(llm_fields)} field groups")
+    click.echo(f"\nUsage:")
+    click.echo(f"  python {output} <input_file>              # Tier 1+2 only (no LLM)")
+    click.echo(f"  from {engine_name} import process          # Import in your code")
+
+
 if __name__ == "__main__":
     cli()
