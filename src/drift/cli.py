@@ -794,27 +794,64 @@ def probe(config_path: str, output: str | None, top_logprobs: int, rules: bool, 
 @click.argument("probe_path", type=click.Path(exists=True))
 @click.option("--input", "input_path", required=True, type=click.Path(exists=True),
               help="Original input text file (e.g., tasks/incident_triage/input.md).")
+@click.option("--probes-dir", default=None, type=click.Path(exists=True),
+              help="Directory of probe JSON files for multi-probe synthesis (Tier 2 discovery).")
+@click.option("--inputs-dir", default=None, type=click.Path(exists=True),
+              help="Directory of input text files matching probes (required with --probes-dir).")
 @click.option("--output", "-o", default=None,
               help="Write generated hybrid.yaml to this path.")
 @click.option("--threshold", default=0.3, type=float,
               help="Entropy threshold: fields below this become rules (default 0.3).")
-def synthesize(probe_path: str, input_path: str, output: str | None, threshold: float):
+def synthesize(probe_path: str, input_path: str, probes_dir: str | None,
+               inputs_dir: str | None, output: str | None, threshold: float):
     """Auto-generate hybrid rules from probe data.
 
-    Takes probe results (from `drift probe -o`) and the original input,
-    traces deterministic output values back to their source in the input,
-    and generates regex extraction rules automatically.
+    Single-probe mode (Tier 1 only):
+        drift synthesize probe.json --input input.md -o hybrid.yaml
 
-    Example:
-        drift probe experiments/baseline.yaml -o probe.json
-        drift synthesize probe.json --input tasks/my_task/input.md -o tasks/my_task/hybrid.yaml
+    Multi-probe mode (Tier 1 + Tier 2 discovery):
+        drift synthesize probe_0.json --input input_0.txt \\
+            --probes-dir probes/ --inputs-dir inputs/ -o hybrid.yaml
+
+    The first probe_path/input pair is the primary probe. When --probes-dir
+    and --inputs-dir are provided, additional probes are used to discover
+    Tier 2 (mapping/conditional) rules from cross-ticket patterns.
     """
-    from drift.hybrid.autogen import synthesize_rules, render_hybrid_yaml, format_synthesis_report
+    from drift.hybrid.autogen import (
+        synthesize_rules, synthesize_rules_multi,
+        render_hybrid_yaml, format_synthesis_report,
+    )
 
     probe_data = json.loads(Path(probe_path).read_text())
     input_text = Path(input_path).read_text()
 
-    result = synthesize_rules(probe_data, input_text, entropy_threshold=threshold)
+    if probes_dir and inputs_dir:
+        # Multi-probe mode: collect all (probe, input) pairs
+        probes_path = Path(probes_dir)
+        inputs_path = Path(inputs_dir)
+
+        probe_files = sorted(probes_path.glob("*.json"))
+        input_files = sorted(inputs_path.glob("*.txt")) or sorted(inputs_path.glob("*.md"))
+
+        # Build mapping by stem name
+        input_map = {f.stem: f for f in input_files}
+
+        pairs = [(probe_data, input_text)]  # primary pair first
+        for pf in probe_files:
+            if pf.resolve() == Path(probe_path).resolve():
+                continue  # skip primary, already added
+            stem = pf.stem
+            if stem in input_map:
+                pairs.append((
+                    json.loads(pf.read_text()),
+                    input_map[stem].read_text(),
+                ))
+
+        click.echo(f"Multi-probe synthesis: {len(pairs)} probes")
+        result = synthesize_rules_multi(pairs, entropy_threshold=threshold)
+    else:
+        result = synthesize_rules(probe_data, input_text, entropy_threshold=threshold)
+
     click.echo(format_synthesis_report(result))
 
     if output:
