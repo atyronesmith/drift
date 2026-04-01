@@ -1086,6 +1086,16 @@ def build(config_path: str, output: str, engine_name: str | None,
     system = exp["system_prompt"]
     prompt = exp["user_prompt"]
     input_text = exp.get("input", "")
+
+    # Warn if input looks like placeholder text
+    if input_text and _looks_like_placeholder(input_text):
+        click.echo(
+            "Warning: input text looks like a placeholder. Rules generated from\n"
+            "placeholder text may not generalize to real data. Consider using:\n"
+            f"  drift build {config_path} --input <real_input_file> -o {output}\n",
+            err=True,
+        )
+
     if input_text:
         prompt = prompt.replace("{input}", input_text)
 
@@ -1161,6 +1171,25 @@ def build(config_path: str, output: str, engine_name: str | None,
     click.echo(f"  Tier 3 (LLM):                {len(synth_result.llm_fields)} field groups")
     click.echo(f"\nUsage:")
     click.echo(f"  python {output} <input_file>")
+
+
+def _looks_like_placeholder(text: str) -> bool:
+    """Detect if input text is likely placeholder/template content."""
+    lower = text.lower()
+    # Strong signals — any one is enough
+    if lower.count("placeholder") >= 2:
+        return True
+    if "lorem ipsum" in lower:
+        return True
+    # Weak signals — need 2+
+    signals = [
+        "placeholder" in lower,
+        "example.com" in lower,
+        "xxx" in lower or "todo" in lower,
+        lower.count("{") >= 3,  # template variables
+        len(text.strip()) < 50,
+    ]
+    return sum(signals) >= 2
 
 
 def _flatten_result(obj, prefix=""):
