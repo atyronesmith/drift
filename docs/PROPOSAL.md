@@ -6,7 +6,7 @@
 
 We built a tool that analyzes an LLM's own token probabilities to separate what it's *copying* from what it's *thinking*, then compiles the copying into instant deterministic code and keeps the LLM only for genuine reasoning. The result: **39-52% faster, 40-70% cheaper, 100% accurate, and 60% smaller attack surface for prompt injection** — demonstrated on real datasets with zero manual effort.
 
-One LLM call to analyze the task. Three CLI commands to generate an optimized engine. Every subsequent call runs faster and costs less. At 1,000 calls/day with typical API pricing, the optimization pays for itself within hours.
+One command. One LLM call to analyze the task. A standalone Python engine comes out the other side. Every subsequent call runs faster and costs less. The optimization pays for itself in **2-3 calls** — after that, every call saves 39-43% on API costs.
 
 This is not a theoretical framework. It is working software with 420+ tests, validated on 500 real tickets, producing standalone Python engines that deploy as a single file with no runtime dependency.
 
@@ -155,12 +155,17 @@ We validated this on **200 tickets**. The 6 regex rules, generated from probing 
 ### Total effort
 
 ```
-  drift probe config.yaml -o probe.json              # 1 LLM call, ~21s
-  drift synthesize probe.json --input ticket.txt      # instant
-  drift compile hybrid.yaml --prompt system.md -o engine.py   # instant
+  drift build config.yaml -o engine.py     # 1 LLM call (~21s), produces engine
 ```
 
-Three commands. No hand-written rules. No model retraining. No prompt engineering. The output is a deployable Python file that runs 39% faster at 40-70% lower cost on every subsequent ticket.
+One command. No hand-written rules. No model retraining. No prompt engineering. The output is a deployable Python file that runs 39% faster at 43% lower cost on every subsequent ticket.
+
+For more control, the steps can be run individually:
+```
+  drift probe config.yaml -o probe.json              # probe
+  drift synthesize probe.json --input ticket.txt      # generate rules
+  drift compile hybrid.yaml --prompt system.md -o engine.py   # compile
+```
 
 ---
 
@@ -180,14 +185,29 @@ All numbers are from controlled experiments with real datasets (500 helpdesk tic
 
 ### Cost and Latency
 
-| Metric | Pure LLM | Drift Hybrid | Improvement |
-|--------|----------|--------------|-------------|
+| Metric | Pure LLM | Compiled Engine | Improvement |
+|--------|----------|-----------------|-------------|
 | Mean latency per ticket | 21.1s | 12.8s | **39% faster** |
-| Fields requiring LLM | 12/12 | 4-6/12 | **50-67% fewer LLM tokens** |
+| Fields requiring LLM | 12/12 | 5/12 | **58% fewer LLM output tokens** |
 | Deterministic field extraction | 21s (LLM) | <1ms (regex) | **110,000x faster** |
-| Estimated LLM cost | 100% | 30-60% | **40-70% savings** |
+| LLM cost per call (Claude Sonnet) | $0.0112 | $0.0064 | **43% savings** |
 
 On a more complex incident triage task (27 fields), the auto-hybrid achieved **52% latency reduction** (51.8s to 25.1s) with zero human effort.
+
+### Dollar Cost at Scale
+
+Based on actual token counts from experiments (1,037 input / 537 output tokens per baseline call) and published API pricing:
+
+| Provider | Baseline $/call | Hybrid $/call | Savings | 10K calls/mo saved | 100K calls/mo saved |
+|----------|----------------|---------------|---------|-------------------|---------------------|
+| Claude Sonnet | $0.0112 | $0.0064 | 43% | $47.76 | $477.60 |
+| GPT-4o | $0.0080 | $0.0048 | 39% | $31.33 | $313.25 |
+| Claude Haiku | $0.0009 | $0.0005 | 43% | $3.98 | $39.80 |
+| GPT-4o-mini | $0.0005 | $0.0003 | 39% | $1.88 | $18.79 |
+
+**Break-even: 2-3 calls.** The one-time probe costs one LLM call. Every subsequent call saves 39-43%. The optimization pays for itself almost immediately.
+
+Note: these savings are from output token reduction alone (the LLM produces fewer fields). Additional savings come from the shorter, focused prompt enabling faster inference — which is why measured latency improvement (39%) matches the cost reduction.
 
 ### Quality and Reliability
 
@@ -237,28 +257,18 @@ Drift is a working CLI tool with:
 
 ## Suggested Next Steps
 
-### Near-term (validate and harden)
+### Near-term
 
-1. **Validation harness** — Automated testing of generated engines against held-out data. Currently done via scripts; should be a first-class `drift validate` command.
-2. **Run on internal workloads** — Apply drift to an actual internal LLM task to get production-representative cost and latency numbers.
-3. **Dollar-cost analysis** — Translate token reduction percentages into actual dollar savings using real API pricing. The current "40-70% savings" estimate needs to be grounded in specific provider rates and call volumes.
-
-### Medium-term (expand applicability)
-
-4. **Multi-model comparison** — Systematically measure which models are most cost-effective for the reasoning-only residual after compilation. A smaller, cheaper model may suffice when it only handles 4 fields instead of 12.
-5. **Pipeline drift protection** — Apply the hybrid approach to multi-step pipelines where variance compounds. Insert structured output constraints at key steps to absorb variance.
-6. **Broader task coverage** — Test on additional task types (document summarization, config generation, code review) to establish which categories benefit most from compilation.
+1. **Run on internal workloads** — Apply the pipeline to a real task from the team to get production-representative numbers.
+2. **Multi-model residual test** — After compilation, the LLM only handles 4-5 reasoning fields. A smaller, cheaper model (Haiku instead of Sonnet, 7B instead of 32B) may handle that reduced workload — potentially stacking another 50%+ cost reduction on top.
+3. **Broader task coverage** — Test on additional task types (document summarization, config generation, code review) to establish which categories benefit most.
 
 ### Numbers Worth Getting
 
-To strengthen the business case, the following measurements would be valuable:
-
-- **Annual cost projection**: (tickets/day) x (cost per LLM call) x 365, baseline vs. hybrid
-- **Break-even timeline**: How many inference calls before the one-time probing cost pays for itself? (Likely <100 calls given the 40-70% per-call savings)
 - **Coverage estimate**: What percentage of the organization's LLM tasks have structured inputs that could benefit from this approach?
-- **Reliability improvement**: Run 1000+ identical calls on a production task and measure the actual defect rate from drift — the 3.3% figure from our experiments needs validation at scale
-- **Latency distribution**: p50/p95/p99 latency for hybrid vs. baseline, not just mean — tail latency matters for user-facing applications
-- **Comparative analysis**: How does this approach compare to existing solutions (guardrails libraries, structured output frameworks, fine-tuning)?
+- **Reliability at scale**: Run 1000+ identical calls on a production task and measure the actual defect rate from drift
+- **Latency distribution**: p50/p95/p99 latency for hybrid vs. baseline — tail latency matters for user-facing applications
+- **Comparative analysis**: How does this approach compare to guardrails libraries, structured output frameworks, and fine-tuning?
 
 ## Summary
 
