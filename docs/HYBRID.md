@@ -529,8 +529,13 @@ The hybrid approach **reduces LLM exposure by 60%+**. Fields extracted by rules 
 | File | Purpose |
 |------|---------|
 | `src/drift/hybrid/autogen.py` | Auto-generates rules from probe data + input text |
-| `src/drift/hybrid/rules.py` | Rule execution: regex, regex_all, literal |
+| `src/drift/hybrid/rules.py` | Rule execution: regex, regex_all, literal, mapping, conditional |
 | `src/drift/hybrid/executor.py` | Orchestration: rules -> prompt -> LLM -> merge |
-| `src/drift/probing/logprobs.py` | Token entropy measurement via Ollama logprobs |
+| `src/drift/hybrid/compiler.py` | Compile hybrid spec to standalone Python engine |
+| `src/drift/probing/logprobs.py` | Token entropy measurement via Ollama logprobs (top-k) |
+| `src/drift/probing/mlx_logprobs.py` | Full-vocab entropy via MLX (exact Shannon entropy) |
+| `src/drift/probing/mlx_attention.py` | Attention weight probing — traces which input tokens drive each output token |
 | `src/drift/probing/synthesizer.py` | Field-level entropy classification |
+| `src/drift/server/mlx_server.py` | HTTP server exposing MLX logprobs + attention over the network |
+| `src/drift/providers/mlx_remote.py` | Client for remote MLX server |
 | `tasks/<name>/hybrid.yaml` | Per-task rule definitions (auto or manual) |
