@@ -1,15 +1,15 @@
-# Plan: Attention-Based Rule Discovery
+# Attention-Based Rule Discovery
 
-## Goal
+## Status: Implemented
 
-Use transformer attention weights to trace which input tokens influence each output token. This would reveal the LLM's internal decision logic for fields like severity, allowing us to build deterministic rules that replace the LLM even for "reasoning" fields.
+Attention probing is implemented in `src/drift/probing/mlx_attention.py` and available remotely via the drift MLX server's `/v1/attention` endpoint. See [MLX.md](MLX.md) for server setup.
 
 ## Why Attention Matters
 
-The current approach (logprob entropy) tells us **how certain** the model is, but not **why**. Attention weights tell us which input tokens the model looked at when producing each output token. For severity classification:
+The logprob entropy approach tells us **how certain** the model is, but not **why**. Attention weights tell us which input tokens the model looked at when producing each output token:
 
 ```
-  Current (logprobs only):
+  Logprobs only:
     Output "P3" → entropy=0.86 → "the model is uncertain" → stays with LLM
 
   With attention:
@@ -20,73 +20,65 @@ The current approach (logprob entropy) tells us **how certain** the model is, bu
                 → could build: if priority=Medium AND category=Network → P3
 ```
 
-## Architecture
+## Implementation
 
+### Two-phase approach
+
+Naive monkey-patching during autoregressive generation causes numerical drift — manual attention computation diverges from fused SDPA over many tokens, producing garbage output. The solution is two phases:
+
+1. **Generate normally** — fused SDPA, correct output
+2. **Replay full sequence** — single forward pass with input+output tokens, patched attention captures weights without affecting generation quality
+
+### Key technical details
+
+- **Float32 softmax** — manual attention must cast Q/K to float32 before computing scores to avoid NaN (matching fused SDPA kernel behavior)
+- **GQA handling** — Qwen2.5 uses grouped query attention (fewer KV heads than query heads), requiring `mx.repeat` to expand KV heads
+- **Causal mask** — during replay, the mask can be the string `"causal"` rather than a tensor; the patched code generates an explicit upper-triangular -inf mask
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `src/drift/probing/mlx_attention.py` | Core attention probing (local + server shared code) |
+| `src/drift/server/mlx_server.py` | `/v1/attention` endpoint |
+| `src/drift/providers/mlx_remote.py` | `probe_attention()` client method |
+
+### Data structures
+
+```python
+@dataclass
+class AttentionProbe:
+    token: str          # decoded output token
+    token_id: int
+    position: int       # position in generated sequence
+    top_attended: list[tuple[int, float]]  # [(input_pos, weight), ...]
+    per_head: list[list[float]] | None     # optional per-head weights
+
+@dataclass
+class AttentionResult:
+    input_tokens: list[str]
+    output_tokens: list[AttentionProbe]
+    content: str
+    model: str
+    n_input: int
 ```
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Step 1: Run model via HuggingFace Transformers                  │
-  │                                                                  │
-  │  Load quantized model (GPTQ/AWQ) locally or on GPU server.      │
-  │  Run inference with output_attentions=True.                      │
-  │  Capture per-layer, per-head attention matrices.                 │
-  │                                                                  │
-  │  Output: attention[layer][head][output_pos][input_pos]           │
-  └──────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Step 2: Attribution mapping                                     │
-  │                                                                  │
-  │  For each high-entropy output token (e.g., "3" in "P3"):        │
-  │  - Average attention across heads/layers (or use last layer)    │
-  │  - Rank input tokens by attention weight                         │
-  │  - Map input tokens back to input fields                         │
-  │    (e.g., token "Medium" → Priority field)                       │
-  │                                                                  │
-  │  Output: {output_field: [(input_field, weight), ...]}            │
-  └──────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Step 3: Conditional rule extraction                             │
-  │                                                                  │
-  │  If severity attends primarily to (priority, category):          │
-  │  - Run N tickets through step 1+2                                │
-  │  - Build decision tree: input features → output value            │
-  │  - Validate tree against held-out tickets                        │
-  │                                                                  │
-  │  Output: conditional rules (lookup tables or decision trees)     │
-  └──────────────────────────────────────────────────────────────────┘
-```
 
-## Requirements
+`AttentionResult` provides helper methods:
+- `attribution_map(top_k)` — per output token, top-k attended input tokens
+- `field_attribution(input_text, output_field_tokens, top_k)` — aggregate attention from a set of output tokens back to input spans
 
-- **HuggingFace Transformers** with `output_attentions=True`
-- **Quantized model** — Qwen2.5-32B requires ~20GB VRAM with 4-bit quantization (GPTQ or AWQ). The Ollama server's GPU should work.
-- **Alternative**: use a smaller model (Qwen2.5-7B) for attention analysis, validate findings on the full 32B via Ollama
+## Next steps
 
-## Challenges
+1. **Attention vs logprobs experiment** — compare attention-based field classification (fields attending to input data = extraction, attending to system prompt = reasoning) against entropy-based classification on helpdesk tickets
+2. **Conditional rule extraction** — for fields where attention points to structured input fields (e.g., severity → priority), build lookup table rules from multi-ticket probing
+3. **Integration with autogen** — feed attention data into `autogen.py` to improve Tier 2 rule discovery (mappings, conditionals)
 
-1. **Attention ≠ causation.** Attention weights show correlation, not causation. A token may attend to "Medium" without it being the deciding factor. Techniques like attention rollout or gradient-based attribution are more reliable but harder to implement.
+## Caveats
 
-2. **Multi-head complexity.** Qwen2.5-32B has 64 attention heads across 64 layers. Which heads matter? Typically the last few layers are most relevant for output decisions.
+- **Attention != causation.** Attention weights show correlation, not causation. A token may attend to "Medium" without it being the deciding factor.
+- **Last-layer bias.** By default only the final layer's attention is captured (`last_n_layers=1`). Earlier layers may contain different information.
+- **Memory.** Full per-head attention for long sequences is large. Use `store_per_head=False` (default) unless needed.
 
-3. **Memory.** Full attention matrices for a 2048-token sequence across all layers/heads are large. May need to only capture the last layer or specific heads.
+## Empirical alternative
 
-4. **Ollama doesn't expose attention.** We'd need a separate inference path through HuggingFace Transformers, adding a dependency and complexity. This would be a research tool, not part of the production pipeline.
-
-## Simpler Alternative: Empirical Conditional Rules
-
-Before building attention extraction, test whether severity is conditionally deterministic by brute force:
-
-1. Run 100+ tickets through the LLM via standard Ollama inference
-2. Group results by (priority, category) or other input features
-3. Check if severity is consistent within each group
-4. If yes, build a lookup table rule
-
-This approach (implemented in `scripts/conditional_severity.py`) achieves the same outcome without attention weights — it discovers the mapping empirically rather than mechanistically. If the mapping is clean, attention analysis becomes unnecessary for this specific field.
-
-Attention analysis remains valuable for:
-- Understanding WHY mappings work (explainability)
-- Discovering non-obvious input features that drive decisions
-- Fields where the mapping depends on free-text content, not structured fields
+For structured fields, the empirical approach (`scripts/conditional_severity.py`) can discover the same mappings by running N tickets and grouping results — no attention weights needed. Attention is most valuable for free-text-dependent fields and explainability.
