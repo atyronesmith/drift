@@ -802,8 +802,11 @@ def probe(config_path: str, output: str | None, top_logprobs: int, rules: bool, 
               help="Write generated hybrid.yaml to this path.")
 @click.option("--threshold", default=0.3, type=float,
               help="Entropy threshold: fields below this become rules (default 0.3).")
+@click.option("--attention", "attention_path", default=None, type=click.Path(exists=True),
+              help="Attention probe JSON (from /v1/attention) for mapping discovery hints.")
 def synthesize(probe_path: str, input_path: str, probes_dir: str | None,
-               inputs_dir: str | None, output: str | None, threshold: float):
+               inputs_dir: str | None, output: str | None, threshold: float,
+               attention_path: str | None):
     """Auto-generate hybrid rules from probe data.
 
     Single-probe mode (Tier 1 only):
@@ -813,9 +816,17 @@ def synthesize(probe_path: str, input_path: str, probes_dir: str | None,
         drift synthesize probe_0.json --input input_0.txt \\
             --probes-dir probes/ --inputs-dir inputs/ -o hybrid.yaml
 
+    With attention hints (guides mapping rule discovery):
+        drift synthesize probe.json --input input.md \\
+            --attention attention.json --probes-dir probes/ --inputs-dir inputs/
+
     The first probe_path/input pair is the primary probe. When --probes-dir
     and --inputs-dir are provided, additional probes are used to discover
     Tier 2 (mapping/conditional) rules from cross-ticket patterns.
+
+    When --attention is provided, per-token attention density analysis
+    identifies which input field drives each output field, guiding Tier 2
+    mapping discovery and lowering accuracy thresholds.
     """
     from drift.hybrid.autogen import (
         synthesize_rules, synthesize_rules_multi,
@@ -824,6 +835,11 @@ def synthesize(probe_path: str, input_path: str, probes_dir: str | None,
 
     probe_data = json.loads(Path(probe_path).read_text())
     input_text = Path(input_path).read_text()
+
+    attention_data = None
+    if attention_path:
+        attention_data = json.loads(Path(attention_path).read_text())
+        click.echo(f"Attention hints loaded from {attention_path}")
 
     if probes_dir and inputs_dir:
         # Multi-probe mode: collect all (probe, input) pairs
@@ -848,7 +864,8 @@ def synthesize(probe_path: str, input_path: str, probes_dir: str | None,
                 ))
 
         click.echo(f"Multi-probe synthesis: {len(pairs)} probes")
-        result = synthesize_rules_multi(pairs, entropy_threshold=threshold)
+        result = synthesize_rules_multi(pairs, entropy_threshold=threshold,
+                                        attention_data=attention_data)
     else:
         result = synthesize_rules(probe_data, input_text, entropy_threshold=threshold)
 

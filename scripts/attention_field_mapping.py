@@ -227,6 +227,7 @@ def main():
 
     # Aggregate across tickets
     all_mappings = defaultdict(lambda: defaultdict(list))
+    first_raw_result = None  # Save first probe for drift synthesize --attention
 
     for i, ticket in enumerate(probe_tickets):
         print(f"─" * 70)
@@ -238,6 +239,9 @@ def main():
         mapping, result = analyze_ticket(provider, ticket, system_prompt, sys_prompt_end)
         elapsed = time.time() - t0
         print(f"  Probed in {elapsed:.1f}s ({len(result.output_tokens)} tokens)")
+
+        if first_raw_result is None:
+            first_raw_result = result
         print()
 
         print(f"  {'Output Field':<24s} {'Value':<35s} {'Top Input Field':<16s} {'%':>6s}  {'Sys%':>5s}")
@@ -413,6 +417,28 @@ def main():
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2)
     print(f"\nResults saved to {out_path}")
+
+    # Save raw attention probe for use with: drift synthesize --attention
+    if first_raw_result:
+        raw = {
+            "input_tokens": first_raw_result.input_tokens,
+            "n_input": first_raw_result.n_input,
+            "output_tokens": [
+                {
+                    "token": t.token,
+                    "token_id": t.token_id,
+                    "position": t.position,
+                    "top_attended": t.top_attended,
+                }
+                for t in first_raw_result.output_tokens
+            ],
+            "content": first_raw_result.content,
+            "model": MODEL,
+        }
+        raw_path = "results/attention_probe_raw.json"
+        with open(raw_path, "w") as f:
+            json.dump(raw, f)
+        print(f"Raw attention probe saved to {raw_path}")
 
 
 if __name__ == "__main__":
