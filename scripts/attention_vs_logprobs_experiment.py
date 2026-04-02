@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Experiment: MLX attention-based rule discovery vs Ollama logprob-only.
+"""Experiment: MLX attention-based rule discovery vs logprob-only.
 
 Compares two approaches to classifying output fields:
   1. Logprob entropy (existing): low entropy → extractable, high → LLM
   2. Attention attribution (new): attends to input data → extractable,
      attends to system prompt/instructions → LLM reasoning
 
-Probes multiple helpdesk tickets, builds rules from each signal,
-and validates on held-out tickets.
+Uses the remote MLX server (drift serve) for all probing and validation.
 """
 
 import asyncio
@@ -21,6 +20,11 @@ from pathlib import Path
 
 # Ensure drift is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from dotenv import load_dotenv
+load_dotenv()
+
+MODEL = "mlx-community/Qwen2.5-32B-Instruct-4bit"
 
 
 def format_ticket(t: dict) -> str:
@@ -48,7 +52,6 @@ def select_tickets(tickets, n_probe=6, n_test=10, seed=42):
     import random
     random.seed(seed)
 
-    # Pick diverse probe tickets by (priority, category)
     groups = {}
     for t in tickets:
         key = (t["priority"], t["category"])
@@ -64,7 +67,6 @@ def select_tickets(tickets, n_probe=6, n_test=10, seed=42):
         if (p, c) in groups and groups[(p, c)] and len(probe) < n_probe:
             probe.append(groups[(p, c)][0])
 
-    # Fill if needed
     probe_ids = {t["id"] for t in probe}
     if len(probe) < n_probe:
         for t in tickets:
@@ -80,21 +82,24 @@ def select_tickets(tickets, n_probe=6, n_test=10, seed=42):
     return probe, test
 
 
-# ── Phase 1: MLX Attention Probing ──────────────────────────────────────
+def make_provider():
+    """Create MLXRemoteProvider using env config."""
+    from drift.providers.mlx_remote import MLXRemoteProvider
+    return MLXRemoteProvider(model=MODEL)
 
-def run_mlx_attention_probes(probe_tickets, system_prompt, model="mlx-community/Qwen2.5-7B-Instruct-4bit"):
-    """Probe each ticket with MLX attention capture."""
-    from drift.probing.mlx_attention import probe_attention
 
+# ── Phase 1: Attention Probing via Remote Server ──────────────────────
+
+def run_attention_probes(provider, probe_tickets, system_prompt):
+    """Probe each ticket with attention capture via remote MLX server."""
     results = []
     for i, ticket in enumerate(probe_tickets):
         input_text = format_ticket(ticket)
-        print(f"  MLX attention probe [{i+1}/{len(probe_tickets)}]: {ticket['id'][:8]}...", end=" ", flush=True)
+        print(f"  Attention probe [{i+1}/{len(probe_tickets)}]: {ticket['id'][:8]}...", end=" ", flush=True)
         t0 = time.time()
-        result = probe_attention(
+        result = provider.probe_attention(
             system=system_prompt,
             prompt=input_text,
-            model=model,
             max_tokens=800,
             top_k_attend=20,
         )
@@ -108,21 +113,33 @@ def run_mlx_attention_probes(probe_tickets, system_prompt, model="mlx-community/
     return results
 
 
-def classify_fields_by_attention(attn_results, system_prompt_len_tokens):
-    """Classify each output field as extraction vs reasoning based on attention.
+def estimate_system_prompt_tokens(provider, system_prompt):
+    """Estimate system prompt token count by probing a minimal input."""
+    # The system prompt occupies the first N tokens of the input sequence.
+    # We can estimate by checking where the user message tokens start.
+    # Use a short probe to get input_tokens and find the boundary.
+    result = provider.probe_attention(
+        system=system_prompt,
+        prompt="test",
+        max_tokens=1,
+        top_k_attend=5,
+    )
+    # Find where "test" appears in input_tokens
+    for i, tok in enumerate(result.input_tokens):
+        if "test" in tok.lower():
+            return i
+    # Fallback: estimate from total input tokens minus a few for user template
+    return max(result.n_input - 10, 0)
 
-    A field is "extraction" if its tokens predominantly attend to input data
-    positions (after the system prompt). It's "reasoning" if tokens attend
-    primarily to system prompt positions.
-    """
-    field_scores = {}  # field_name -> list of (input_ratio, ticket_id)
+
+def classify_fields_by_attention(attn_results, system_prompt_len_tokens):
+    """Classify each output field as extraction vs reasoning based on attention."""
+    field_scores = {}
 
     for entry in attn_results:
         result = entry["attention_result"]
         ticket = entry["ticket"]
-        n_input = result.n_input
 
-        # Parse the output JSON to find field boundaries
         output_text = ""
         field_token_ranges = {}
         current_field = None
@@ -131,19 +148,15 @@ def classify_fields_by_attention(attn_results, system_prompt_len_tokens):
         for i, probe in enumerate(result.output_tokens):
             output_text += probe.token
 
-            # Detect JSON field names
-            # Look for "field_name": pattern
             for match in re.finditer(r'"(\w+(?:\.\w+)*)":\s*$', output_text):
                 if current_field and field_start is not None:
                     field_token_ranges[current_field] = (field_start, i)
                 current_field = match.group(1)
                 field_start = i + 1
 
-        # Close last field
         if current_field and field_start is not None:
             field_token_ranges[current_field] = (field_start, len(result.output_tokens))
 
-        # For each field, compute attention distribution
         for field_name, (start, end) in field_token_ranges.items():
             input_data_weight = 0
             system_prompt_weight = 0
@@ -155,8 +168,6 @@ def classify_fields_by_attention(attn_results, system_prompt_len_tokens):
                     if math.isnan(weight):
                         continue
                     total_weight += weight
-                    # System prompt tokens are roughly the first portion
-                    # Input data starts after system prompt
                     if pos < system_prompt_len_tokens:
                         system_prompt_weight += weight
                     else:
@@ -171,7 +182,6 @@ def classify_fields_by_attention(attn_results, system_prompt_len_tokens):
                 (input_ratio, ticket["id"])
             )
 
-    # Aggregate across tickets
     field_classification = {}
     for field_name, scores in field_scores.items():
         ratios = [s[0] for s in scores]
@@ -186,21 +196,18 @@ def classify_fields_by_attention(attn_results, system_prompt_len_tokens):
     return field_classification
 
 
-# ── Phase 2: MLX Logprob Probing ────────────────────────────────────────
+# ── Phase 2: Logprob Probing via Remote Server ────────────────────────
 
-def run_mlx_logprob_probes(probe_tickets, system_prompt, model="mlx-community/Qwen2.5-7B-Instruct-4bit"):
-    """Probe each ticket with MLX logprobs (entropy-only, no attention)."""
-    from drift.probing.mlx_logprobs import probe_with_mlx
-
+def run_logprob_probes(provider, probe_tickets, system_prompt):
+    """Probe each ticket with logprobs via remote MLX server."""
     results = []
     for i, ticket in enumerate(probe_tickets):
         input_text = format_ticket(ticket)
-        print(f"  MLX logprob probe [{i+1}/{len(probe_tickets)}]: {ticket['id'][:8]}...", end=" ", flush=True)
+        print(f"  Logprob probe [{i+1}/{len(probe_tickets)}]: {ticket['id'][:8]}...", end=" ", flush=True)
         t0 = time.time()
-        result = probe_with_mlx(
+        result = provider.probe_logprobs(
             system=system_prompt,
             prompt=input_text,
-            model=model,
             max_tokens=800,
         )
         elapsed = time.time() - t0
@@ -214,7 +221,7 @@ def run_mlx_logprob_probes(probe_tickets, system_prompt, model="mlx-community/Qw
 
 
 def classify_fields_by_entropy(logprob_results, entropy_threshold=0.3):
-    """Classify fields by entropy (existing approach)."""
+    """Classify fields by entropy."""
     field_entropies = {}
 
     for entry in logprob_results:
@@ -261,10 +268,8 @@ def classify_fields_by_entropy(logprob_results, entropy_threshold=0.3):
     return field_classification
 
 
-# ── Phase 3: Rule Generation ────────────────────────────────────────────
+# ── Phase 3: Rules ────────────────────────────────────────────────────
 
-# These are the rules from attention analysis — we'll discover which fields
-# attend to input and build regex rules for them
 TICKET_EXTRACTION_RULES = {
     "ticket.id": r"Ticket\s+ID:\s*(\S+)",
     "ticket.subject": r"Subject:\s*(.+?)(?:\n|$)",
@@ -284,7 +289,6 @@ SEVERITY_CONDITIONAL = {
 
 
 def extract_with_rules(input_text, rules):
-    """Apply regex rules to extract fields."""
     extracted = {}
     for field, pattern in rules.items():
         m = re.search(pattern, input_text, re.MULTILINE)
@@ -294,35 +298,28 @@ def extract_with_rules(input_text, rules):
 
 
 def apply_severity_rule(extracted):
-    """Apply conditional severity mapping."""
     priority = extracted.get("ticket.stated_priority", "")
     category = extracted.get("ticket.stated_category", "")
 
-    # Check specific (priority, category) first
     for (p, c), sev in SEVERITY_CONDITIONAL.items():
         if c is not None and p == priority and c == category:
             return sev
-    # Then priority-only
     for (p, c), sev in SEVERITY_CONDITIONAL.items():
         if c is None and p == priority:
             return sev
     return "P3"
 
 
-# ── Phase 4: Validation ────────────────────────────────────────────────
+# ── Phase 5: Validation ──────────────────────────────────────────────
 
-def validate_rules(test_tickets, system_prompt, rules, model="mlx-community/Qwen2.5-7B-Instruct-4bit"):
+def validate_rules(provider, test_tickets, system_prompt, rules):
     """Run LLM on test tickets, compare rule extractions with LLM output."""
-    from drift.providers.mlx import MLXProvider
-
-    provider = MLXProvider(model=model)
     results = []
 
     for i, ticket in enumerate(test_tickets):
         input_text = format_ticket(ticket)
         print(f"  Validating [{i+1}/{len(test_tickets)}]: {ticket['id'][:8]}...", end=" ", flush=True)
 
-        # Get LLM output (ground truth)
         t0 = time.time()
         llm_resp = asyncio.run(provider.complete(
             system=system_prompt, prompt=input_text,
@@ -330,9 +327,7 @@ def validate_rules(test_tickets, system_prompt, rules, model="mlx-community/Qwen
         ))
         elapsed = time.time() - t0
 
-        # Parse LLM JSON
         content = llm_resp.content
-        # Strip markdown fencing if present
         content = re.sub(r'^```json\s*', '', content)
         content = re.sub(r'\s*```$', '', content)
         try:
@@ -341,11 +336,9 @@ def validate_rules(test_tickets, system_prompt, rules, model="mlx-community/Qwen
             print(f"JSON parse error, skipping")
             continue
 
-        # Extract with rules
         rule_extracted = extract_with_rules(input_text, rules)
         rule_severity = apply_severity_rule(rule_extracted)
 
-        # Compare
         ticket_result = {
             "ticket_id": ticket["id"],
             "priority": ticket["priority"],
@@ -355,7 +348,6 @@ def validate_rules(test_tickets, system_prompt, rules, model="mlx-community/Qwen
             "mismatches": {},
         }
 
-        # Compare extraction fields
         llm_ticket = llm_json.get("ticket", {})
         field_map = {
             "ticket.id": llm_ticket.get("id", ""),
@@ -375,7 +367,6 @@ def validate_rules(test_tickets, system_prompt, rules, model="mlx-community/Qwen
                     "rule": rule_val, "llm": llm_val
                 }
 
-        # Compare severity
         llm_severity = llm_json.get("assessment", {}).get("severity", "")
         if rule_severity == llm_severity:
             ticket_result["matches"]["assessment.severity"] = rule_severity
@@ -392,61 +383,69 @@ def validate_rules(test_tickets, system_prompt, rules, model="mlx-community/Qwen
     return results
 
 
-# ── Main ────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────
 
 def main():
     system_prompt = open("tasks/helpdesk_triage/triage_system.md").read()
     tickets = load_tickets()
     probe_tickets, test_tickets = select_tickets(tickets)
 
+    provider = make_provider()
+
     print("=" * 70)
-    print("EXPERIMENT: Attention-Based vs Logprob-Only Rule Discovery")
+    print("EXPERIMENT: Attention vs Logprob Rule Discovery (Remote 32B)")
     print("=" * 70)
+    print(f"Server:        {provider.base_url}")
+    print(f"Model:         {MODEL}")
     print(f"Probe tickets: {len(probe_tickets)}")
     print(f"Test tickets:  {len(test_tickets)}")
-    print(f"Model: mlx-community/Qwen2.5-7B-Instruct-4bit")
     print()
 
-    model = "mlx-community/Qwen2.5-7B-Instruct-4bit"
+    # Verify server is up
+    print("Checking server...", end=" ", flush=True)
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["curl", "-s", f"{provider.base_url}/health"],
+            capture_output=True, text=True, timeout=5,
+        )
+        health = json.loads(r.stdout)
+        print(f"OK — {health['model']}")
+    except Exception as e:
+        print(f"FAILED: {e}")
+        print("Start the server with: drift serve <model> --host 0.0.0.0 --port 8080")
+        sys.exit(1)
 
-    # ── Phase 1: MLX Attention Probing ──
+    # ── Phase 1: Attention Probing ──
+    print()
     print("─" * 70)
-    print("Phase 1: MLX Attention Probing")
+    print("Phase 1: Attention Probing (remote 32B)")
     print("─" * 70)
-    attn_results = run_mlx_attention_probes(probe_tickets, system_prompt, model)
 
-    # Estimate system prompt token count
-    sys_tokens = len(attn_results[0]["attention_result"].input_tokens)
-    # System prompt is roughly the first part of input tokens before ticket data
-    # The formatted input starts after the system prompt in the chat template
-    # Approximate: count tokens in system prompt vs total input
-    from mlx_lm import load as mlx_load
-    _, tokenizer = mlx_load(model)
-    sys_only = tokenizer.apply_chat_template(
-        [{"role": "system", "content": system_prompt}],
-        tokenize=False, add_generation_prompt=False,
-    )
-    sys_prompt_token_count = len(tokenizer.encode(sys_only))
-    print(f"\nSystem prompt tokens: ~{sys_prompt_token_count}")
+    print("  Estimating system prompt token boundary...", end=" ", flush=True)
+    sys_prompt_token_count = estimate_system_prompt_tokens(provider, system_prompt)
+    print(f"~{sys_prompt_token_count} tokens")
+
+    attn_results = run_attention_probes(provider, probe_tickets, system_prompt)
 
     attn_classification = classify_fields_by_attention(attn_results, sys_prompt_token_count)
 
-    print("\nAttention-based field classification:")
+    print(f"\nAttention-based field classification:")
     print(f"  {'Field':<30s} {'Avg Input Attn':>15s} {'Class':>12s}  {'N':>3s}")
     print(f"  {'─'*30} {'─'*15} {'─'*12}  {'─'*3}")
     for field, info in sorted(attn_classification.items()):
         print(f"  {field:<30s} {info['avg_input_attention_ratio']:>14.1%} {info['classification']:>12s}  {info['n_tickets']:>3d}")
 
-    # ── Phase 2: MLX Logprob Probing ──
+    # ── Phase 2: Logprob Probing ──
     print()
     print("─" * 70)
-    print("Phase 2: MLX Logprob Probing (entropy-only, same model)")
+    print("Phase 2: Logprob Probing (remote 32B, exact entropy)")
     print("─" * 70)
-    logprob_results = run_mlx_logprob_probes(probe_tickets, system_prompt, model)
+    logprob_results = run_logprob_probes(provider, probe_tickets, system_prompt)
 
     entropy_classification = classify_fields_by_entropy(logprob_results)
 
-    print("\nEntropy-based field classification:")
+    print(f"\nEntropy-based field classification:")
     print(f"  {'Field':<30s} {'Avg Entropy':>12s} {'Class':>12s}  {'N':>3s}")
     print(f"  {'─'*30} {'─'*12} {'─'*12}  {'─'*3}")
     for field, info in sorted(entropy_classification.items()):
@@ -475,19 +474,18 @@ def main():
         print(f"  {field:<30s} {a_class:>12s} {e_class:>12s} {marker:>8s}")
     print(f"\n  Agreement: {agreements}/{agreements+disagreements}")
 
-    # ── Phase 4: Show detailed attention for interesting fields ──
+    # ── Phase 4: Detailed attribution ──
     print()
     print("─" * 70)
     print("Phase 4: Detailed Attention Attribution for Key Fields")
     print("─" * 70)
 
-    for entry in attn_results[:3]:  # first 3 tickets
+    for entry in attn_results[:3]:
         result = entry["attention_result"]
         ticket = entry["ticket"]
         print(f"\n  Ticket: {ticket['id'][:8]} ({ticket['priority']}/{ticket['category']})")
         print(f"  Output preview: {result.content[:100]}...")
 
-        # Show per-field attribution
         output_text = ""
         current_field = None
         field_start = None
@@ -496,7 +494,6 @@ def main():
             output_text += probe.token
             for match in re.finditer(r'"(\w+(?:\.\w+)*)":\s*$', output_text):
                 if current_field and field_start is not None:
-                    # Show this field's attribution
                     field_indices = list(range(field_start, i))
                     if field_indices:
                         attrib = result.field_attribution("", field_indices, top_k=5)
@@ -505,30 +502,25 @@ def main():
                             for j in field_indices
                             if j < len(result.output_tokens)
                         ).strip()[:40]
-                        # Categorize attention
-                        input_w = sum(w for t, w in attrib if not math.isnan(w))
                         top_str = ", ".join(
                             f"{t!r}({w:.3f})"
                             for t, w in attrib[:3]
                             if not math.isnan(w)
                         )
-                        print(f"    {current_field:<28s} = {value_text!r:>42s}  ← {top_str}")
+                        print(f"    {current_field:<28s} = {value_text!r:>42s}  <- {top_str}")
                 current_field = match.group(1)
                 field_start = i + 1
 
-    # ── Phase 5: Validate rules on held-out tickets ──
+    # ── Phase 5: Validation ──
     print()
     print("─" * 70)
     print("Phase 5: Validation on Held-Out Tickets")
     print("─" * 70)
 
-    # Determine which rules to use based on attention classification
     attn_rules = {}
     for field, info in attn_classification.items():
         if info["classification"] == "extraction":
-            # Map field name to our extraction rules
             for rule_field, pattern in TICKET_EXTRACTION_RULES.items():
-                # Match field names loosely
                 short = rule_field.split(".")[-1]
                 if short in field or field in short:
                     attn_rules[rule_field] = pattern
@@ -548,13 +540,11 @@ def main():
     for f in sorted(entropy_rules):
         print(f"  {f}")
 
-    # Validate with ALL extraction rules (superset)
     print(f"\nValidating ALL extraction rules + severity conditional on {len(test_tickets)} tickets...")
     validation_results = validate_rules(
-        test_tickets, system_prompt, TICKET_EXTRACTION_RULES, model
+        provider, test_tickets, system_prompt, TICKET_EXTRACTION_RULES
     )
 
-    # Summary
     total_matches = sum(len(r["matches"]) for r in validation_results)
     total_mismatches = sum(len(r["mismatches"]) for r in validation_results)
     total_fields = total_matches + total_mismatches
@@ -566,7 +556,6 @@ def main():
     print(f"Extraction rule accuracy: {total_matches}/{total_fields} ({100*total_matches/total_fields:.1f}%)")
     print(f"Severity rule accuracy:   {sev_matches}/{len(validation_results)} ({100*sev_matches/len(validation_results):.1f}%)")
 
-    # Show mismatches
     if total_mismatches > 0:
         print(f"\nMismatches:")
         for r in validation_results:
@@ -576,9 +565,11 @@ def main():
     # Save results
     output = {
         "experiment": "attention_vs_logprobs",
-        "model": model,
+        "model": MODEL,
+        "server": provider.base_url,
         "n_probe_tickets": len(probe_tickets),
         "n_test_tickets": len(test_tickets),
+        "system_prompt_tokens": sys_prompt_token_count,
         "attention_classification": {
             k: {kk: vv for kk, vv in v.items() if kk != "ratios"}
             for k, v in attn_classification.items()
