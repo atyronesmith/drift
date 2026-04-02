@@ -10,7 +10,8 @@ import math
 
 import mlx.core as mx
 from mlx_lm import load
-from mlx_lm.utils import generate_step
+from mlx_lm.generate import generate_step
+from mlx_lm.sample_utils import make_sampler
 
 from drift.probing.logprobs import ProbeResult, TokenProbe
 
@@ -66,13 +67,13 @@ def probe_with_mlx(
     tokens_out: list[TokenProbe] = []
     generated_tokens: list[int] = []
 
-    temp = temperature if temperature > 0 else 0
+    sampler = make_sampler(temp=temperature if temperature > 0 else 0)
     prompt_tokens = input_ids
 
-    for token, logits in generate_step(prompt_tokens, mlx_model, temp=temp):
-        token_id = token.item()
+    for token, logits in generate_step(prompt_tokens, mlx_model, sampler=sampler):
+        token_id = token.item() if hasattr(token, 'item') else int(token)
 
-        if token_id == tokenizer.eos_token_id:
+        if token_id in getattr(tokenizer, 'eos_token_ids', {tokenizer.eos_token_id}):
             break
         if len(generated_tokens) >= max_tokens:
             break
@@ -80,7 +81,8 @@ def probe_with_mlx(
         generated_tokens.append(token_id)
 
         # Full-vocab log probabilities
-        log_probs = mx.log_softmax(logits.reshape(-1), axis=-1)
+        import mlx.nn as nn
+        log_probs = nn.log_softmax(logits.reshape(-1), axis=-1)
         log_probs_list = log_probs.tolist()
 
         token_logprob = log_probs_list[token_id]
@@ -115,7 +117,7 @@ def probe_with_mlx(
             exact_entropy=exact_entropy,
         ))
 
-        prompt_tokens = token.reshape(1)
+        prompt_tokens = mx.array([token_id])
 
     content = tokenizer.decode(generated_tokens)
     return ProbeResult(tokens=tokens_out, content=content, model=model)
