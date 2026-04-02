@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 
 import mlx.core as mx
-from mlx_lm import load
+import mlx.nn as nn
 from mlx_lm.generate import generate_step
 from mlx_lm.sample_utils import make_sampler
 
@@ -32,29 +32,21 @@ class MLXTokenProbe(TokenProbe):
         return self._exact_entropy
 
 
-def probe_with_mlx(
+def _probe_logprobs_with_model(
+    mlx_model,
+    tokenizer,
     system: str,
     prompt: str,
-    model: str = "mlx-community/Qwen2.5-32B-Instruct-4bit",
+    model_name: str = "",
     max_tokens: int = 4096,
     temperature: float = 0,
     top_k_report: int = 10,
 ) -> ProbeResult:
-    """Probe using MLX with full vocabulary distributions.
+    """Core logprob probing using a pre-loaded model.
 
-    Args:
-        system: System prompt.
-        prompt: User prompt.
-        model: HuggingFace model ID (mlx-community format).
-        max_tokens: Maximum tokens to generate.
-        temperature: Sampling temperature (0 = greedy).
-        top_k_report: Number of top alternatives to include per token.
-
-    Returns:
-        ProbeResult with exact entropy from full vocab distribution.
+    This function is used by both local probe_with_mlx() and the remote
+    MLX server endpoint.
     """
-    mlx_model, tokenizer = load(model)
-
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
@@ -81,7 +73,6 @@ def probe_with_mlx(
         generated_tokens.append(token_id)
 
         # Full-vocab log probabilities
-        import mlx.nn as nn
         log_probs = nn.log_softmax(logits.reshape(-1), axis=-1)
         log_probs_list = log_probs.tolist()
 
@@ -120,4 +111,34 @@ def probe_with_mlx(
         prompt_tokens = mx.array([token_id])
 
     content = tokenizer.decode(generated_tokens)
-    return ProbeResult(tokens=tokens_out, content=content, model=model)
+    return ProbeResult(tokens=tokens_out, content=content, model=model_name)
+
+
+def probe_with_mlx(
+    system: str,
+    prompt: str,
+    model: str = "mlx-community/Qwen2.5-32B-Instruct-4bit",
+    max_tokens: int = 4096,
+    temperature: float = 0,
+    top_k_report: int = 10,
+) -> ProbeResult:
+    """Probe using MLX with full vocabulary distributions.
+
+    Args:
+        system: System prompt.
+        prompt: User prompt.
+        model: HuggingFace model ID (mlx-community format).
+        max_tokens: Maximum tokens to generate.
+        temperature: Sampling temperature (0 = greedy).
+        top_k_report: Number of top alternatives to include per token.
+
+    Returns:
+        ProbeResult with exact entropy from full vocab distribution.
+    """
+    from mlx_lm import load
+    mlx_model, tokenizer = load(model)
+    return _probe_logprobs_with_model(
+        mlx_model, tokenizer, system, prompt,
+        model_name=model, max_tokens=max_tokens,
+        temperature=temperature, top_k_report=top_k_report,
+    )

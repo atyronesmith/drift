@@ -24,5 +24,8 @@ def make_provider(config: dict):
     elif provider_name == "mlx":
         from drift.providers.mlx import MLXProvider
         return MLXProvider(model=model)
+    elif provider_name == "mlx-remote":
+        from drift.providers.mlx_remote import MLXRemoteProvider
+        return MLXRemoteProvider(model=model, base_url=config.get("base_url"))
     else:
         return OllamaProvider(model=model, base_url=config.get("base_url"))
