@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import mlx.core as mx
-from mlx_lm import load, generate
+from mlx_lm import generate
 from mlx_lm.sample_utils import make_sampler
 
 
@@ -98,37 +98,27 @@ def _get_model_attention_class(model):
     raise ValueError("Could not find Attention class in model")
 
 
-def probe_attention(
+def _probe_attention_with_model(
+    mlx_model,
+    tokenizer,
     system: str,
     prompt: str,
-    model: str = "mlx-community/Qwen2.5-32B-Instruct-4bit",
+    model_name: str = "",
     max_tokens: int = 4096,
     temperature: float = 0,
     top_k_attend: int = 20,
     last_n_layers: int = 1,
     store_per_head: bool = False,
 ) -> AttentionResult:
-    """Probe with attention weight capture (two-phase).
+    """Core attention probing using a pre-loaded model.
+
+    This function is used by both local probe_attention() and the remote
+    MLX server endpoint.
 
     Phase 1: Generate output normally using fused SDPA (correct results).
     Phase 2: Replay full sequence (input + output) with patched attention
              in a single forward pass to capture weights.
-
-    Args:
-        system: System prompt.
-        prompt: User prompt.
-        model: HuggingFace model ID (mlx-community format).
-        max_tokens: Maximum tokens to generate.
-        temperature: Sampling temperature (0 = greedy).
-        top_k_attend: Number of top attended positions to store per token.
-        last_n_layers: How many final layers to average attention from.
-        store_per_head: Whether to store per-head attention weights.
-
-    Returns:
-        AttentionResult with per-token attention attribution.
     """
-    mlx_model, tokenizer = load(model)
-
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
@@ -216,15 +206,13 @@ def probe_attention(
         attn_cls.__call__ = orig_call
 
     # Extract per-output-token attention from the captured weights
-    # captured has last_n_layers entries, each with shape [B, n_heads, full_seq, full_seq]
     output_probes: list[AttentionProbe] = []
 
     for out_idx, token_id in enumerate(output_ids):
-        seq_pos = n_input + out_idx  # position in full sequence
+        seq_pos = n_input + out_idx
 
         avg_weights = None
         for _, w in captured:
-            # w shape: [B, n_heads, full_seq, full_seq]
             w_at_pos = w[0, :, seq_pos, :]  # [n_heads, full_seq]
             head_avg = w_at_pos.mean(axis=0)  # [full_seq]
             if avg_weights is None:
@@ -256,6 +244,41 @@ def probe_attention(
         input_tokens=input_tokens_decoded,
         output_tokens=output_probes,
         content=content,
-        model=model,
+        model=model_name,
         n_input=n_input,
+    )
+
+
+def probe_attention(
+    system: str,
+    prompt: str,
+    model: str = "mlx-community/Qwen2.5-32B-Instruct-4bit",
+    max_tokens: int = 4096,
+    temperature: float = 0,
+    top_k_attend: int = 20,
+    last_n_layers: int = 1,
+    store_per_head: bool = False,
+) -> AttentionResult:
+    """Probe with attention weight capture (two-phase).
+
+    Args:
+        system: System prompt.
+        prompt: User prompt.
+        model: HuggingFace model ID (mlx-community format).
+        max_tokens: Maximum tokens to generate.
+        temperature: Sampling temperature (0 = greedy).
+        top_k_attend: Number of top attended positions to store per token.
+        last_n_layers: How many final layers to average attention from.
+        store_per_head: Whether to store per-head attention weights.
+
+    Returns:
+        AttentionResult with per-token attention attribution.
+    """
+    from mlx_lm import load
+    mlx_model, tokenizer = load(model)
+    return _probe_attention_with_model(
+        mlx_model, tokenizer, system, prompt,
+        model_name=model, max_tokens=max_tokens,
+        temperature=temperature, top_k_attend=top_k_attend,
+        last_n_layers=last_n_layers, store_per_head=store_per_head,
     )

@@ -1207,5 +1207,22 @@ def _flatten_result(obj, prefix=""):
     return results
 
 
+@cli.command()
+@click.argument("model")
+@click.option("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0).")
+@click.option("--port", default=8080, type=int, help="Bind port (default: 8080).")
+def serve(model: str, host: str, port: int):
+    """Start the drift MLX inference server.
+
+    Run on an Apple Silicon Mac to expose MLX inference over HTTP,
+    including full-vocab logprobs and attention weight probing.
+
+    Example:
+        drift serve mlx-community/Qwen2.5-32B-Instruct-4bit --port 8080
+    """
+    from drift.server.mlx_server import start_server
+    start_server(model=model, host=host, port=port)
+
+
 if __name__ == "__main__":
     cli()
