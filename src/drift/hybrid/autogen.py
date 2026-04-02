@@ -422,16 +422,212 @@ def _get_nested(obj: dict, path: str):
     return obj
 
 
+def _compute_attention_hints(
+    attention_data: dict,
+    input_field_labels: dict[str, str] | None = None,
+) -> dict[str, tuple[str, float]]:
+    """Compute per-token attention density to discover input→output field mappings.
+
+    Takes serialized attention probe data (from /v1/attention endpoint) and
+    identifies which input field each output field attends to most, normalized
+    by token count per input region to avoid bias toward long fields.
+
+    Args:
+        attention_data: JSON from probe_attention() or /v1/attention endpoint.
+            Must have: input_tokens, output_tokens, n_input, content.
+        input_field_labels: {name: regex_pattern} for input field labels.
+            If None, auto-detects common patterns (Label:, Key=).
+
+    Returns:
+        {output_field: (input_field, density_ratio)} where density_ratio > 1.0
+        means the field has higher per-token density than the description.
+    """
+    input_tokens = attention_data.get("input_tokens", [])
+    output_tokens = attention_data.get("output_tokens", [])
+    n_input = attention_data.get("n_input", len(input_tokens))
+
+    if not input_tokens or not output_tokens:
+        return {}
+
+    # Find system prompt boundary: look for the user message start
+    # In chat template, user content appears after system content
+    # Heuristic: find where input data tokens begin (after template tokens)
+    sys_prompt_end = _find_sys_prompt_end(input_tokens, n_input)
+
+    # Map input token positions to field regions
+    if input_field_labels is None:
+        input_field_labels = _auto_detect_input_fields(input_tokens, sys_prompt_end)
+
+    pos_to_field, field_token_counts = _map_tokens_to_fields(
+        input_tokens, sys_prompt_end, input_field_labels
+    )
+
+    if not field_token_counts:
+        return {}
+
+    # Parse output field boundaries from generated JSON
+    output_text = ""
+    current_field = None
+    field_start = None
+    field_token_ranges = {}
+
+    for i, probe in enumerate(output_tokens):
+        token = probe["token"] if isinstance(probe, dict) else probe.token
+        output_text += token
+
+        for match in re.finditer(r'"(\w+(?:\.\w+)*)":\s*$', output_text):
+            if current_field and field_start is not None:
+                field_token_ranges[current_field] = (field_start, i)
+            current_field = match.group(1)
+            field_start = i + 1
+
+    if current_field and field_start is not None:
+        field_token_ranges[current_field] = (field_start, len(output_tokens))
+
+    # Compute per-field attention distribution over input field regions
+    hints = {}
+    for out_field, (start, end) in field_token_ranges.items():
+        field_weights = {}
+        total_weight = 0
+
+        for idx in range(start, min(end, len(output_tokens))):
+            probe = output_tokens[idx]
+            top_attended = probe["top_attended"] if isinstance(probe, dict) else probe.top_attended
+            for pos, weight in top_attended:
+                if isinstance(weight, float) and (weight != weight):  # NaN check
+                    continue
+                total_weight += weight
+                if pos in pos_to_field:
+                    f = pos_to_field[pos]
+                    field_weights[f] = field_weights.get(f, 0) + weight
+
+        if total_weight == 0:
+            continue
+
+        # Normalize to percentages
+        field_pcts = {f: w / total_weight for f, w in field_weights.items()}
+
+        # Compute per-token density
+        densities = {}
+        for f, pct in field_pcts.items():
+            n_tokens = field_token_counts.get(f, 1)
+            densities[f] = pct / n_tokens
+
+        # Find description density as baseline
+        desc_density = densities.get("description", 0)
+        if desc_density == 0:
+            # No description field — use the longest field as baseline
+            longest = max(field_token_counts, key=field_token_counts.get)
+            desc_density = densities.get(longest, 0.001)
+
+        # Find non-description field with highest density
+        non_desc = {f: d for f, d in densities.items() if f != "description"}
+        if non_desc:
+            top_field = max(non_desc, key=non_desc.get)
+            top_density = non_desc[top_field]
+            ratio = top_density / max(desc_density, 0.0001)
+            if ratio > 1.0:
+                hints[out_field] = (top_field, round(ratio, 2))
+
+    return hints
+
+
+def _find_sys_prompt_end(input_tokens: list[str], n_input: int) -> int:
+    """Estimate where the system prompt ends in the input token sequence."""
+    # Look for common chat template markers
+    text = ""
+    for i, tok in enumerate(input_tokens):
+        text += tok
+        # After system content, there's usually <|im_end|>\n<|im_start|>user
+        if "<|im_start|>user" in text or "<|im_start|>\nuser" in text:
+            return i
+        if "user\n" in text[-20:] and i > 10:
+            return i
+    # Fallback: assume system prompt is roughly half the input
+    return n_input // 2
+
+
+def _auto_detect_input_fields(input_tokens: list[str], sys_prompt_end: int) -> dict[str, str]:
+    """Auto-detect input field labels from token sequence.
+
+    Only matches labels at the start of lines to avoid false positives
+    from content within the description or other free-text fields.
+    """
+    text = "".join(input_tokens[sys_prompt_end:])
+    labels = {}
+
+    # Find "Label:" patterns at line beginnings only
+    # Use [\w ] instead of [\w\s] to prevent matching across newlines
+    for m in re.finditer(r'^[ \t]*(\w[\w ]*\w|\w)\s*:', text, re.MULTILINE):
+        label = m.group(1).strip().lower().replace(" ", "_")
+        escaped = re.escape(m.group(1).strip()) + r":"
+        labels[label] = escaped
+
+    return labels
+
+
+def _map_tokens_to_fields(
+    input_tokens: list[str],
+    sys_prompt_end: int,
+    field_labels: dict[str, str],
+) -> tuple[dict[int, str], dict[str, int]]:
+    """Map input token positions to field regions.
+
+    Returns:
+        pos_to_field: {token_position: field_name}
+        field_token_counts: {field_name: count}
+    """
+    text = ""
+    token_offsets = []
+    for i in range(sys_prompt_end, len(input_tokens)):
+        start = len(text)
+        text += input_tokens[i]
+        end = len(text)
+        token_offsets.append((start, end, i))
+
+    # Find field label positions
+    field_positions = []
+    for field_name, pattern in field_labels.items():
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            field_positions.append((m.start(), field_name))
+
+    field_positions.sort()
+
+    pos_to_field = {}
+    field_token_counts = {}
+    for idx, (fp_start, field_name) in enumerate(field_positions):
+        if idx + 1 < len(field_positions):
+            fp_end = field_positions[idx + 1][0]
+        else:
+            fp_end = len(text)
+
+        count = 0
+        for char_start, char_end, token_pos in token_offsets:
+            if char_start >= fp_start and char_start < fp_end:
+                pos_to_field[token_pos] = field_name
+                count += 1
+
+        field_token_counts[field_name] = count
+
+    return pos_to_field, field_token_counts
+
+
 def _discover_tier2_rules(
     probes: list[tuple[dict, str]],
     tier1_paths: set[str],
     llm_paths: set[str],
     all_flat_fields: list[tuple[str, list]],
+    attention_hints: dict[str, tuple[str, float]] | None = None,
 ) -> list[GeneratedRule]:
     """Discover mapping and conditional rules from multi-probe data.
 
     For each field marked llm_required by single-probe analysis, check if
     the output is conditionally deterministic when grouped by Tier 1 fields.
+
+    When attention_hints are provided, uses them to:
+    - Prioritize the suggested source field for mapping discovery
+    - Lower accuracy threshold (60% vs 80%) when attention agrees
     """
     # Collect all parsed outputs and input texts
     parsed_outputs = []
@@ -452,6 +648,20 @@ def _discover_tier2_rules(
             vals.append(v)
         field_values[path] = vals
 
+    # Build reverse map from attention hints: map input field names to
+    # Tier 1 paths that extract from that field
+    hint_source_paths = {}
+    if attention_hints:
+        # For each output field with a hint, find the Tier 1 path whose
+        # extracted value comes from the hinted input field
+        for out_field, (in_field, ratio) in attention_hints.items():
+            # Map input field name to possible tier1 paths
+            # e.g., input "category" -> tier1 path "ticket.stated_category"
+            for t1_path in tier1_paths:
+                if in_field in t1_path.lower() or t1_path.lower().endswith(in_field):
+                    hint_source_paths[out_field] = (t1_path, ratio)
+                    break
+
     # Only analyze fields that are in llm_paths (high entropy per single probe)
     # but might be conditionally deterministic
     tier2_rules = []
@@ -461,8 +671,22 @@ def _discover_tier2_rules(
         if not values or all(v is None for v in values):
             continue
 
+        # Check if attention gives us a hint for this field
+        field_name = path.split(".")[-1]
+        attention_source = None
+        attention_ratio = 0.0
+        for hint_key, (source_path, ratio) in hint_source_paths.items():
+            if hint_key == field_name or path.endswith(hint_key):
+                attention_source = source_path
+                attention_ratio = ratio
+                break
+
         # Try each Tier 1 field as a potential source for mapping
-        best_rule = _find_best_mapping(path, values, tier1_paths, field_values, parsed_outputs)
+        best_rule = _find_best_mapping(
+            path, values, tier1_paths, field_values, parsed_outputs,
+            preferred_source=attention_source,
+            lower_threshold=attention_ratio > 1.0,
+        )
         if best_rule:
             tier2_rules.append(best_rule)
 
@@ -475,19 +699,29 @@ def _find_best_mapping(
     tier1_paths: set[str],
     field_values: dict[str, list],
     parsed_outputs: list[dict],
+    preferred_source: str | None = None,
+    lower_threshold: bool = False,
 ) -> GeneratedRule | None:
     """Find the best mapping or conditional rule for a target field.
 
     Tries single-source mappings first, then multi-source conditionals.
+    When preferred_source is set (from attention hints), it's tried first
+    and the accuracy threshold is lowered if lower_threshold is True.
     """
     n = len(target_values)
+    accuracy_threshold = 0.6 if lower_threshold else 0.8
 
     # Try single-source mappings (simplest)
     best_source = None
     best_accuracy = 0.0
     best_mapping = None
 
-    for source_path in tier1_paths:
+    # If attention suggests a source, try it first
+    source_order = list(tier1_paths)
+    if preferred_source and preferred_source in tier1_paths:
+        source_order = [preferred_source] + [p for p in source_order if p != preferred_source]
+
+    for source_path in source_order:
         source_values = field_values.get(source_path, [])
         if len(source_values) != n:
             continue
@@ -525,8 +759,8 @@ def _find_best_mapping(
             best_source = source_path
             best_mapping = mapping
 
-    # Need at least 80% accuracy for a mapping rule
-    if best_accuracy >= 0.8 and best_mapping:
+    # Need sufficient accuracy for a mapping rule
+    if best_accuracy >= accuracy_threshold and best_mapping:
         # Determine default: most common value not in mapping
         all_target = [str(v) for v in target_values if v is not None]
         mapped_source_vals = set(best_mapping.keys())
@@ -634,6 +868,7 @@ def _find_conditional(
 def synthesize_rules_multi(
     probes: list[tuple[dict, str]],
     entropy_threshold: float = 0.3,
+    attention_data: dict | None = None,
 ) -> SynthesisResult:
     """Auto-generate hybrid rules from multiple probes.
 
@@ -643,9 +878,15 @@ def synthesize_rules_multi(
     3. For fields marked llm_required, check conditional determinism
     4. Emit mapping/conditional rules for Tier 2 fields
 
+    When attention_data is provided (from /v1/attention or probe_attention()),
+    per-token density analysis guides Tier 2 discovery by identifying which
+    input field drives each output field, lowering accuracy thresholds for
+    attention-confirmed mappings.
+
     Args:
         probes: List of (probe_data, input_text) pairs
         entropy_threshold: Fields below this are rule candidates
+        attention_data: Optional attention probe JSON for mapping hints
     """
     if not probes:
         return SynthesisResult(rules=[], llm_fields=[], stats={
@@ -668,8 +909,16 @@ def synthesize_rules_multi(
     parsed_first = _parse_llm_output(probes[0][0])
     all_flat_fields = _flatten_json(parsed_first) if parsed_first else []
 
+    # Step 2.5: Compute attention hints if attention data is provided
+    attention_hints = None
+    if attention_data:
+        attention_hints = _compute_attention_hints(attention_data)
+
     # Step 3: Discover Tier 2 rules
-    tier2_rules = _discover_tier2_rules(probes, tier1_paths, llm_paths, all_flat_fields)
+    tier2_rules = _discover_tier2_rules(
+        probes, tier1_paths, llm_paths, all_flat_fields,
+        attention_hints=attention_hints,
+    )
 
     # Step 4: Merge results — replace llm_required rules with Tier 2 where found
     tier2_paths = {r.path for r in tier2_rules}
@@ -704,6 +953,9 @@ def synthesize_rules_multi(
     stats["tier2_types"] = {r.rule_type: 0 for r in tier2_rules}
     for r in tier2_rules:
         stats["tier2_types"][r.rule_type] += 1
+    if attention_hints:
+        stats["attention_hints"] = len(attention_hints)
+        stats["attention_fields"] = {k: v[0] for k, v in attention_hints.items()}
 
     return SynthesisResult(rules=final_rules, llm_fields=llm_top_level, stats=stats)
 
