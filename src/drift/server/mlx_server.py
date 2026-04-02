@@ -12,9 +12,13 @@ Usage:
 
 from __future__ import annotations
 
+import io
 import json
 import logging
+import os
+import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import partial
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -29,7 +33,24 @@ _model_name = ""
 _model_lock = Lock()
 
 
-def _ensure_model(model_name: str):
+@contextmanager
+def _quiet_stderr():
+    """Suppress stderr (huggingface download progress bars)."""
+    old = sys.stderr
+    sys.stderr = io.StringIO()
+    old_fd = os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    try:
+        yield
+    finally:
+        sys.stderr = old
+        os.dup2(old_fd, 2)
+        os.close(old_fd)
+
+
+def _ensure_model(model_name: str, quiet: bool = False):
     """Load the MLX model (called once on first request or at startup)."""
     global _model, _tokenizer, _model_name
     with _model_lock:
@@ -38,7 +59,11 @@ def _ensure_model(model_name: str):
         from mlx_lm import load
         log.info(f"Loading model: {model_name}")
         t0 = time.time()
-        _model, _tokenizer = load(model_name)
+        if quiet:
+            with _quiet_stderr():
+                _model, _tokenizer = load(model_name)
+        else:
+            _model, _tokenizer = load(model_name)
         log.info(f"Model loaded in {time.time() - t0:.1f}s")
         _model_name = model_name
 
@@ -225,20 +250,40 @@ class DriftMLXHandler(BaseHTTPRequestHandler):
         })
 
 
-def start_server(model: str, host: str = "0.0.0.0", port: int = 8080):
+def start_server(model: str, host: str = "0.0.0.0", port: int = 8080,
+                  log_file: str | None = None):
     """Start the drift MLX server."""
+    import click
+
+    handlers: list[logging.Handler] = []
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+    else:
+        handlers.append(logging.StreamHandler())
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=handlers,
     )
-    _ensure_model(model)
+
+    _ensure_model(model, quiet=True)
+    click.echo(f"Model loaded: {_model_name}")
+    if log_file:
+        click.echo(f"Logging to: {log_file}")
+    click.echo()
     server = HTTPServer((host, port), DriftMLXHandler)
-    log.info(f"Drift MLX server running on http://{host}:{port}")
-    log.info(f"Endpoints: /v1/chat/completions, /v1/logprobs, /v1/attention, /health")
+    click.echo(f"Serving on http://{host}:{port}")
+    click.echo(f"Endpoints:")
+    click.echo(f"  POST /v1/chat/completions  — OpenAI-compatible inference")
+    click.echo(f"  POST /v1/logprobs          — full-vocab entropy probing")
+    click.echo(f"  POST /v1/attention         — attention weight probing")
+    click.echo(f"  GET  /health               — server status")
+    click.echo()
+    click.echo(f"Press Ctrl+C to stop")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        log.info("Shutting down")
+        click.echo("\nShutting down...")
         server.shutdown()
 
 
@@ -248,5 +293,6 @@ if __name__ == "__main__":
     parser.add_argument("model", help="HuggingFace model ID (e.g. mlx-community/Qwen2.5-32B-Instruct-4bit)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--log", dest="log_file", default=None, help="Log file path")
     args = parser.parse_args()
-    start_server(args.model, args.host, args.port)
+    start_server(args.model, args.host, args.port, log_file=args.log_file)

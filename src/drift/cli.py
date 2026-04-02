@@ -1211,7 +1211,8 @@ def _flatten_result(obj, prefix=""):
 @click.argument("model")
 @click.option("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0).")
 @click.option("--port", default=8080, type=int, help="Bind port (default: 8080).")
-def serve(model: str, host: str, port: int):
+@click.option("--log", "log_file", default=None, type=click.Path(), help="Log file for request logging.")
+def serve(model: str, host: str, port: int, log_file: str | None):
     """Start the drift MLX inference server.
 
     Run on an Apple Silicon Mac to expose MLX inference over HTTP,
@@ -1220,8 +1221,14 @@ def serve(model: str, host: str, port: int):
     Example:
         drift serve mlx-community/Qwen2.5-32B-Instruct-4bit --port 8080
     """
+    click.echo(f"Drift MLX server")
+    click.echo(f"  Model: {model}")
+    click.echo(f"  Host:  {host}")
+    click.echo(f"  Port:  {port}")
+    click.echo()
+    click.echo(f"Loading model (this may take a while)...")
     from drift.server.mlx_server import start_server
-    start_server(model=model, host=host, port=port)
+    start_server(model=model, host=host, port=port, log_file=log_file)
 
 
 if __name__ == "__main__":
