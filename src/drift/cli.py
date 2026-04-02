@@ -929,6 +929,93 @@ def compile(spec_path: str, prompt_path: str, output: str, engine_name: str | No
     click.echo(f"  from {engine_name} import process          # Import in your code")
 
 
+def _run_validation(engine_path: str, input_dir: str, check_fields: list[str] | None = None) -> dict:
+    """Run validation of a compiled engine against input files.
+
+    Returns:
+        {
+            "field_hits": {path: count},
+            "field_total": {path: count},
+            "errors": [(filename, error_msg)],
+            "per_file": {filename: {path: value}},
+            "failing_files": [filename, ...],
+            "overall_rate": float,
+        }
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("engine", engine_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    if not hasattr(module, "process"):
+        raise ValueError(f"{engine_path} has no process() function")
+
+    input_path = Path(input_dir)
+    input_files = sorted(input_path.glob("*.txt")) or sorted(input_path.glob("*.md"))
+    if not input_files:
+        raise ValueError(f"no .txt or .md files in {input_dir}")
+
+    field_hits = {}
+    field_total = {}
+    errors = []
+    per_file = {}
+    failing_files = []
+
+    for input_file in input_files:
+        input_text = input_file.read_text()
+        try:
+            result = module.process(input_text)
+        except Exception as e:
+            errors.append((input_file.name, str(e)))
+            failing_files.append(input_file.name)
+            continue
+
+        flat = _flatten_result(result)
+        file_results = {}
+
+        for path, value in flat:
+            if check_fields and path not in check_fields:
+                continue
+            field_total[path] = field_total.get(path, 0) + 1
+            file_results[path] = value
+            if value is not None:
+                field_hits[path] = field_hits.get(path, 0) + 1
+
+        per_file[input_file.name] = file_results
+
+    # Count missing fields: any field seen in some files but absent in others
+    # is a failure (the engine should extract it from every input)
+    all_fields = set(field_total.keys())
+    n_processed = len(input_files) - len(errors)
+    for field in all_fields:
+        if check_fields and field not in check_fields:
+            continue
+        if field_total[field] < n_processed:
+            # Some files didn't produce this field at all
+            field_total[field] = n_processed
+
+    # Identify failing files: any file missing a field that others have
+    for filename, file_results in per_file.items():
+        missing = all_fields - set(file_results.keys())
+        if missing:
+            failing_files.append(filename)
+
+    extracted_total = sum(field_hits.values())
+    attempted_total = sum(field_total.values())
+    overall_rate = extracted_total / attempted_total * 100 if attempted_total > 0 else 0
+
+    return {
+        "field_hits": field_hits,
+        "field_total": field_total,
+        "errors": errors,
+        "per_file": per_file,
+        "failing_files": failing_files,
+        "overall_rate": overall_rate,
+        "n_files": len(input_files),
+    }
+
+
 @cli.command()
 @click.argument("engine_path", type=click.Path(exists=True))
 @click.option("--input-dir", required=True, type=click.Path(exists=True),
@@ -947,27 +1034,12 @@ def validate(engine_path: str, input_dir: str, expected_dir: str | None, fields:
         drift validate engine.py --input-dir tickets/
         drift validate engine.py --input-dir tickets/ --expected-dir expected/
     """
-    import importlib.util
+    check_fields = [f.strip() for f in fields.split(",")] if fields else None
 
-    # Load the engine module
-    spec = importlib.util.spec_from_file_location("engine", engine_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    if not hasattr(module, "process"):
-        click.echo(f"Error: {engine_path} has no process() function", err=True)
-        raise SystemExit(1)
-
-    # Collect input files
-    input_path = Path(input_dir)
-    input_files = sorted(
-        input_path.glob("*.txt")
-    ) or sorted(
-        input_path.glob("*.md")
-    )
-
-    if not input_files:
-        click.echo(f"Error: no .txt or .md files in {input_dir}", err=True)
+    try:
+        vr = _run_validation(engine_path, input_dir, check_fields)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
 
     # Load expected outputs if provided
@@ -976,90 +1048,63 @@ def validate(engine_path: str, input_dir: str, expected_dir: str | None, fields:
         for ef in Path(expected_dir).glob("*.json"):
             expected_map[ef.stem] = json.loads(ef.read_text())
 
-    # Parse field filter
-    check_fields = [f.strip() for f in fields.split(",")] if fields else None
-
-    # Run validation
     click.echo(f"Engine:  {engine_path}")
-    click.echo(f"Inputs:  {len(input_files)} files")
+    click.echo(f"Inputs:  {vr['n_files']} files")
     if expected_map:
         click.echo(f"Expected: {len(expected_map)} files")
     click.echo()
 
-    field_hits = {}  # path -> count of non-None extractions
-    field_total = {}  # path -> total attempts
-    field_correct = {}  # path -> count matching expected
-    errors = []
-    total = len(input_files)
-
-    for input_file in input_files:
-        input_text = input_file.read_text()
-        try:
-            result = module.process(input_text)
-        except Exception as e:
-            errors.append((input_file.name, str(e)))
-            continue
-
-        # Flatten result to check fields
-        flat = _flatten_result(result)
-
-        for path, value in flat:
-            if check_fields and path not in check_fields:
-                continue
-            field_total[path] = field_total.get(path, 0) + 1
-            if value is not None:
-                field_hits[path] = field_hits.get(path, 0) + 1
-
-        # Compare against expected if available
-        stem = input_file.stem
-        if stem in expected_map:
-            expected_flat = dict(_flatten_result(expected_map[stem]))
-            for path, value in flat:
-                if check_fields and path not in check_fields:
-                    continue
-                if path in expected_flat and value == expected_flat[path]:
-                    field_correct[path] = field_correct.get(path, 0) + 1
-
-    # Report
+    # Report extraction rates
     click.echo(f"{'Field':<40} {'Extracted':>10} {'Rate':>8}", nl=True)
     click.echo(f"{'-'*40} {'-'*10} {'-'*8}")
 
-    all_paths = sorted(field_total.keys())
+    all_paths = sorted(vr["field_total"].keys())
     for path in all_paths:
-        hits = field_hits.get(path, 0)
-        tot = field_total[path]
+        hits = vr["field_hits"].get(path, 0)
+        tot = vr["field_total"][path]
         rate = hits / tot * 100 if tot > 0 else 0
         click.echo(f"{path:<40} {hits:>5}/{tot:<4} {rate:>6.0f}%")
 
-    extracted_total = sum(field_hits.values())
-    attempted_total = sum(field_total.values())
-    overall_rate = extracted_total / attempted_total * 100 if attempted_total > 0 else 0
-    click.echo(f"\nOverall extraction rate: {extracted_total}/{attempted_total} ({overall_rate:.0f}%)")
+    click.echo(f"\nOverall extraction rate: "
+               f"{sum(vr['field_hits'].values())}/{sum(vr['field_total'].values())} "
+               f"({vr['overall_rate']:.0f}%)")
 
     if expected_map:
+        # Accuracy comparison
+        field_correct = {}
+        for filename, file_results in vr["per_file"].items():
+            stem = Path(filename).stem
+            if stem in expected_map:
+                expected_flat = dict(_flatten_result(expected_map[stem]))
+                for path, value in file_results.items():
+                    if check_fields and path not in check_fields:
+                        continue
+                    if path in expected_flat and value == expected_flat[path]:
+                        field_correct[path] = field_correct.get(path, 0) + 1
+
         click.echo(f"\n{'Field':<40} {'Correct':>10} {'Accuracy':>10}")
         click.echo(f"{'-'*40} {'-'*10} {'-'*10}")
         for path in all_paths:
             if path in field_correct:
                 correct = field_correct[path]
-                tot = min(field_total[path], len(expected_map))
+                tot = min(vr["field_total"][path], len(expected_map))
                 acc = correct / tot * 100 if tot > 0 else 0
                 click.echo(f"{path:<40} {correct:>5}/{tot:<4} {acc:>8.0f}%")
 
         correct_total = sum(field_correct.values())
         expected_total = sum(
-            min(field_total.get(p, 0), len(expected_map))
+            min(vr["field_total"].get(p, 0), len(expected_map))
             for p in field_correct
         )
         overall_acc = correct_total / expected_total * 100 if expected_total > 0 else 0
         click.echo(f"\nOverall accuracy: {correct_total}/{expected_total} ({overall_acc:.0f}%)")
 
-    if errors:
-        click.echo(f"\nErrors ({len(errors)}/{total}):")
-        for name, err in errors[:10]:
+    if vr["errors"]:
+        click.echo(f"\nErrors ({len(vr['errors'])}/{vr['n_files']}):")
+        for name, err in vr["errors"][:10]:
             click.echo(f"  {name}: {err}")
 
-    click.echo(f"\nProcessed {total - len(errors)}/{total} inputs successfully")
+    click.echo(f"\nProcessed {vr['n_files'] - len(vr['errors'])}/{vr['n_files']} inputs successfully")
 
 
 @cli.command()
@@ -1222,6 +1267,192 @@ def _flatten_result(obj, prefix=""):
     else:
         results.append((prefix, obj))
     return results
+
+
+@cli.command()
+@click.argument("engine_path", type=click.Path(exists=True))
+@click.option("--input-dir", required=True, type=click.Path(exists=True),
+              help="Directory of input text files to validate against.")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True),
+              help="Experiment config YAML (for model/prompt settings).")
+@click.option("--max-iter", default=3, type=int,
+              help="Maximum refinement iterations (default: 3).")
+@click.option("--target-rate", default=100, type=int,
+              help="Target extraction rate %% (default: 100).")
+@click.option("--probe-sample", default=5, type=int,
+              help="Max failing inputs to probe per iteration (default: 5).")
+@click.option("--threshold", default=0.3, type=float,
+              help="Entropy threshold for rule generation (default: 0.3).")
+def refine(engine_path: str, input_dir: str, config_path: str,
+           max_iter: int, target_rate: int, probe_sample: int, threshold: float):
+    """Iterative refinement: validate, re-probe failures, recompile.
+
+    Takes a compiled engine and iteratively improves it by:
+    1. Validating against input files to find failures
+    2. Probing failing inputs to get fresh logprob data
+    3. Re-synthesizing rules from broader probe data
+    4. Recompiling the engine
+
+    Repeats until the target extraction rate is met or max iterations reached.
+
+    Example:
+        drift refine engine.py --input-dir tickets/ \\
+            --config experiments/baseline-helpdesk.yaml --max-iter 3
+    """
+    from drift.probing.logprobs import probe_with_logprobs
+    from drift.hybrid.autogen import synthesize_rules_multi, format_synthesis_report
+    from drift.hybrid.compiler import compile_engine
+
+    import random
+
+    # Load experiment config
+    config = yaml.safe_load(Path(config_path).read_text())
+    config = resolve_task_prompts(config, Path.cwd() / "tasks")
+    exp = config["experiment"]
+
+    system = exp["system_prompt"]
+    prompt_template = exp["user_prompt"]
+    model = exp["model"]
+    base_url = exp.get("base_url")
+    temperature = exp.get("temperature", 0)
+    engine_name = Path(engine_path).stem
+
+    input_path = Path(input_dir)
+    all_probes = []  # (probe_data, input_text) pairs accumulated across iterations
+    history = []  # extraction rate per iteration
+
+    click.echo(f"Iterative refinement: {engine_path}")
+    click.echo(f"  Model:       {model}")
+    click.echo(f"  Inputs:      {input_dir}")
+    click.echo(f"  Max iter:    {max_iter}")
+    click.echo(f"  Target rate: {target_rate}%")
+    click.echo()
+
+    for iteration in range(max_iter):
+        click.echo(f"{'=' * 60}")
+        click.echo(f"  Iteration {iteration + 1}/{max_iter}")
+        click.echo(f"{'=' * 60}")
+
+        # Step 1: Validate
+        click.echo(f"\n  Validating...")
+        try:
+            vr = _run_validation(engine_path, input_dir)
+        except ValueError as e:
+            click.echo(f"  Error: {e}", err=True)
+            raise SystemExit(1)
+
+        rate = vr["overall_rate"]
+        history.append(rate)
+
+        # Show per-field rates
+        for path in sorted(vr["field_total"].keys()):
+            hits = vr["field_hits"].get(path, 0)
+            tot = vr["field_total"][path]
+            field_rate = hits / tot * 100 if tot > 0 else 0
+            marker = "" if field_rate == 100 else " <--"
+            click.echo(f"    {path:<36} {hits:>4}/{tot:<4} {field_rate:>5.0f}%{marker}")
+
+        click.echo(f"\n  Overall: {rate:.0f}%  |  "
+                   f"Failures: {len(vr['failing_files'])}  |  "
+                   f"Errors: {len(vr['errors'])}")
+
+        # Step 2: Check stopping conditions
+        if rate >= target_rate:
+            click.echo(f"\n  Target rate {target_rate}% reached.")
+            break
+
+        if not vr["failing_files"]:
+            click.echo(f"\n  No failing files (errors only). Cannot refine further.")
+            break
+
+        # Step 3: Probe failing inputs
+        sample = vr["failing_files"]
+        if len(sample) > probe_sample:
+            sample = random.sample(sample, probe_sample)
+
+        click.echo(f"\n  Probing {len(sample)} failing inputs...")
+        new_probes = 0
+        for filename in sample:
+            filepath = input_path / filename
+            if not filepath.exists():
+                continue
+
+            input_text = filepath.read_text()
+            prompt = prompt_template.replace("{input}", input_text)
+
+            click.echo(f"    {filename}...", nl=False)
+            try:
+                result = probe_with_logprobs(
+                    system=system, prompt=prompt, model=model,
+                    base_url=base_url, top_logprobs=5, temperature=temperature,
+                )
+                probe_data = {
+                    "tokens": [
+                        {"token": t.token, "logprob": t.logprob, "entropy": t.entropy}
+                        for t in result.tokens
+                    ],
+                }
+                all_probes.append((probe_data, input_text))
+                new_probes += 1
+                click.echo(f" {len(result.tokens)} tokens")
+            except Exception as e:
+                click.echo(f" error: {e}")
+
+        if new_probes == 0:
+            click.echo(f"\n  No probes succeeded. Cannot refine further.")
+            break
+
+        click.echo(f"\n  Total probes: {len(all_probes)}")
+
+        # Step 4: Synthesize rules from all probes
+        click.echo(f"\n  Synthesizing rules (threshold={threshold})...")
+        synth_result = synthesize_rules_multi(all_probes, entropy_threshold=threshold)
+
+        total_rules = len([r for r in synth_result.rules if r.rule_type != "llm_required"])
+        click.echo(f"    {total_rules} rules, {len(synth_result.llm_fields)} LLM field groups")
+
+        # Step 5: Compile updated engine
+        rules_for_compile = []
+        for rule in synth_result.rules:
+            if rule.rule_type == "llm_required":
+                continue
+            entry = {"path": rule.path, "type": rule.rule_type}
+            if rule.pattern:
+                entry["pattern"] = rule.pattern
+            if rule.rule_type == "literal":
+                entry["value"] = rule.value
+            if rule.rule_type == "mapping":
+                entry["source"] = rule.source
+                entry["map"] = rule.map
+                if rule.default is not None:
+                    entry["default"] = rule.default
+            if rule.rule_type == "conditional":
+                entry["conditions"] = rule.conditions
+                if rule.default is not None:
+                    entry["default"] = rule.default
+            rules_for_compile.append(entry)
+
+        code = compile_engine(
+            rules=rules_for_compile,
+            llm_fields=synth_result.llm_fields,
+            system_prompt=system,
+            engine_name=engine_name,
+        )
+        Path(engine_path).write_text(code)
+        click.echo(f"\n  Engine recompiled: {engine_path}")
+
+    # Final summary
+    click.echo(f"\n{'=' * 60}")
+    click.echo(f"  Refinement complete")
+    click.echo(f"{'=' * 60}")
+    for i, rate in enumerate(history):
+        marker = " <-- final" if i == len(history) - 1 else ""
+        click.echo(f"    Iteration {i + 1}: {rate:.0f}%{marker}")
+
+    if len(history) > 1:
+        improvement = history[-1] - history[0]
+        click.echo(f"\n  Improvement: {improvement:+.0f}% ({history[0]:.0f}% -> {history[-1]:.0f}%)")
+    click.echo(f"  Probes used: {len(all_probes)}")
 
 
 @cli.command()
