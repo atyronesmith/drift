@@ -35,6 +35,7 @@ class MLXProvider:
 
     async def complete(self, system: str, prompt: str, **kwargs) -> LLMResponse:
         from mlx_lm import generate
+        from mlx_lm.sample_utils import make_sampler
 
         self._ensure_loaded()
 
@@ -51,7 +52,7 @@ class MLXProvider:
         input_ids = self._tokenizer.encode(formatted)
         input_token_count = len(input_ids)
 
-        temp = temperature if temperature > 0 else 0
+        sampler = make_sampler(temp=temperature if temperature > 0 else 0)
 
         start = time.perf_counter()
         output = generate(
@@ -59,7 +60,7 @@ class MLXProvider:
             self._tokenizer,
             prompt=formatted,
             max_tokens=max_tokens,
-            temp=temp,
+            sampler=sampler,
         )
         elapsed_ms = (time.perf_counter() - start) * 1000
 
