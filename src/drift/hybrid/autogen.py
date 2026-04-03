@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 class GeneratedRule:
     path: str
     value: str | int | float | list | None
-    rule_type: str  # regex, literal, regex_all, mapping, conditional
+    rule_type: str  # regex, literal, regex_all, mapping, conditional, classifier
     pattern: str | None  # generated regex
     confidence: float
     entropy: float
@@ -32,6 +32,13 @@ class GeneratedRule:
     default: str | int | float | None = None
     # For conditional rules
     conditions: list[dict] | None = None  # [{when: {field: val}, value: val}]
+    # For classifier rules
+    vocabulary: list[str] | None = None
+    weights: list[list[float]] | None = None
+    bias: list[float] | None = None
+    classes: list[str] | None = None
+    confidence_threshold: float | None = None
+    structured_features: list[dict] | None = None
 
 
 @dataclass
@@ -865,6 +872,180 @@ def _find_conditional(
     return None
 
 
+STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "must",
+    "i", "we", "you", "he", "she", "it", "they", "me", "us", "him", "her",
+    "my", "our", "your", "his", "its", "their",
+    "this", "that", "these", "those", "what", "which", "who", "whom",
+    "and", "or", "but", "if", "when", "while", "as", "at", "by", "for",
+    "in", "of", "on", "to", "with", "from", "not", "no", "so", "than",
+    "too", "very", "just", "also", "how", "all", "each", "every", "any",
+    "few", "more", "most", "other", "some", "such", "only", "own", "same",
+    "then", "there", "here", "now", "about", "up", "out", "into", "over",
+    "after", "before", "between", "under", "again", "further",
+    "hello", "please", "thanks", "thank", "help", "issue", "issues",
+    "hey", "dear", "regards", "best", "team", "hi", "support",
+}
+
+
+def _discover_classifier_rules(
+    probes: list[tuple[dict, str]],
+    tier1_paths: set[str],
+    llm_paths: set[str],
+    field_values: dict[str, list],
+    vocab_size: int = 150,
+    confidence_threshold: float = 0.95,
+    min_accuracy: float = 0.70,
+) -> list[GeneratedRule]:
+    """Train classifiers for classification fields from probe data.
+
+    For each llm_required field with < 20 unique values, trains a logistic
+    regression classifier on bag-of-words + structured features. Fields
+    that pass the accuracy threshold are emitted as classifier rules.
+
+    Requires scikit-learn (optional dependency). Returns empty list if
+    unavailable or too few probes.
+    """
+    try:
+        import numpy as np
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import cross_val_score
+    except ImportError:
+        return []
+
+    if len(probes) < 20:
+        return []
+
+    # Parse all LLM outputs
+    parsed_outputs = []
+    input_texts = []
+    for probe_data, input_text in probes:
+        parsed = _parse_llm_output(probe_data)
+        if parsed:
+            parsed_outputs.append(parsed)
+            input_texts.append(input_text)
+
+    if len(parsed_outputs) < 20:
+        return []
+
+    n = len(parsed_outputs)
+
+    # Find classification candidates: llm_required fields with < 20 unique values
+    candidates = []
+    for path in llm_paths:
+        values = [_get_nested(p, path) for p in parsed_outputs]
+        non_none = [v for v in values if v is not None]
+        if not non_none:
+            continue
+        unique = set(str(v) for v in non_none)
+        if 2 <= len(unique) <= 20 and len(non_none) >= 20:
+            candidates.append((path, values))
+
+    if not candidates:
+        return []
+
+    # Build vocabulary from all input texts
+    from collections import Counter
+    word_counts = Counter()
+    for text in input_texts:
+        words = set(re.findall(r"[a-z]+", text.lower()))
+        word_counts.update(w for w in words if w not in STOPWORDS and len(w) >= 3)
+
+    vocab = [w for w, _ in word_counts.most_common(vocab_size)]
+    vocab_index = {w: i for i, w in enumerate(vocab)}
+
+    # Identify structured feature sources from Tier 1 fields
+    structured_features = []
+    tier1_categories = {}
+    for t1_path in sorted(tier1_paths):
+        vals = field_values.get(t1_path, [])
+        unique_vals = sorted(set(str(v) for v in vals if v is not None))
+        if 2 <= len(unique_vals) <= 20:
+            structured_features.append({
+                "source": t1_path,
+                "categories": unique_vals,
+            })
+            tier1_categories[t1_path] = unique_vals
+
+    # Build feature matrix
+    n_sf = sum(len(sf["categories"]) for sf in structured_features)
+    n_features = len(vocab) + n_sf
+    X = np.zeros((n, n_features), dtype=np.float32)
+
+    for i, text in enumerate(input_texts):
+        # Bag-of-words (binary)
+        for w in re.findall(r"[a-z]+", text.lower()):
+            if w in vocab_index:
+                X[i, vocab_index[w]] = 1.0
+
+        # Structured one-hot
+        offset = len(vocab)
+        for sf in structured_features:
+            source_val = str(field_values.get(sf["source"], [None] * n)[i])
+            for j, cat in enumerate(sf["categories"]):
+                if source_val == cat:
+                    X[i, offset + j] = 1.0
+            offset += len(sf["categories"])
+
+    # Train classifier for each candidate field
+    rules = []
+    for path, values in candidates:
+        # Build label array, filtering None values
+        mask = [v is not None for v in values]
+        y = np.array([str(v) for v, m in zip(values, mask) if m])
+        X_field = X[mask]
+
+        classes = sorted(set(y))
+        if len(classes) < 2:
+            continue
+
+        # Filter rare classes (< 3 samples)
+        class_counts = Counter(y)
+        rare = {c for c, cnt in class_counts.items() if cnt < 3}
+        if rare:
+            keep = np.array([yi not in rare for yi in y])
+            X_field = X_field[keep]
+            y = y[keep]
+            classes = sorted(set(y))
+            if len(classes) < 2 or len(y) < 20:
+                continue
+
+        # Train logistic regression with cross-validation
+        lr = LogisticRegression(max_iter=1000, C=0.5, random_state=42)
+        n_splits = min(5, min(Counter(y).values()))
+        if n_splits < 2:
+            continue
+
+        cv_scores = cross_val_score(lr, X_field, y, cv=n_splits, scoring="accuracy")
+        cv_mean = cv_scores.mean()
+
+        if cv_mean < min_accuracy:
+            continue
+
+        # Fit on full data and export weights
+        lr.fit(X_field, y)
+
+        rules.append(GeneratedRule(
+            path=path,
+            value=None,
+            rule_type="classifier",
+            pattern=None,
+            confidence=round(cv_mean, 3),
+            entropy=0.0,
+            validated=True,
+            vocabulary=vocab,
+            weights=lr.coef_.tolist(),
+            bias=lr.intercept_.tolist(),
+            classes=list(lr.classes_),
+            confidence_threshold=confidence_threshold,
+            structured_features=structured_features if structured_features else None,
+        ))
+
+    return rules
+
+
 def synthesize_rules_multi(
     probes: list[tuple[dict, str]],
     entropy_threshold: float = 0.3,
@@ -920,12 +1101,30 @@ def synthesize_rules_multi(
         attention_hints=attention_hints,
     )
 
-    # Step 4: Merge results — replace llm_required rules with Tier 2 where found
+    # Step 3.5: Discover Tier 3 classifier rules (needs 20+ probes)
     tier2_paths = {r.path for r in tier2_rules}
-    final_rules = [r for r in base_result.rules if r.path not in tier2_paths]
-    final_rules.extend(tier2_rules)
+    remaining_llm_paths = llm_paths - tier2_paths
 
-    # Update llm_fields — remove paths that are now Tier 2
+    # Collect per-field values for all probes
+    all_field_values = {}
+    for path, _ in all_flat_fields:
+        all_field_values[path] = [
+            _get_nested(p, path) for p in
+            [_parse_llm_output(pd) for pd, _ in probes]
+            if p is not None
+        ]
+
+    tier3_rules = _discover_classifier_rules(
+        probes, tier1_paths, remaining_llm_paths, all_field_values,
+    )
+
+    # Step 4: Merge results — replace llm_required rules with Tier 2/3 where found
+    tier23_paths = tier2_paths | {r.path for r in tier3_rules}
+    final_rules = [r for r in base_result.rules if r.path not in tier23_paths]
+    final_rules.extend(tier2_rules)
+    final_rules.extend(tier3_rules)
+
+    # Update llm_fields — remove paths that are now Tier 2 or 3
     remaining_llm = [r.path for r in final_rules if r.rule_type == "llm_required"]
     llm_top_level = []
     seen = set()
@@ -953,6 +1152,8 @@ def synthesize_rules_multi(
     stats["tier2_types"] = {r.rule_type: 0 for r in tier2_rules}
     for r in tier2_rules:
         stats["tier2_types"][r.rule_type] += 1
+    stats["tier3_discovered"] = len(tier3_rules)
+    stats["tier3_fields"] = [r.path for r in tier3_rules]
     if attention_hints:
         stats["attention_hints"] = len(attention_hints)
         stats["attention_fields"] = {k: v[0] for k, v in attention_hints.items()}
@@ -989,6 +1190,16 @@ def render_hybrid_yaml(result: SynthesisResult) -> str:
                 lines.append(f"        value: {_yaml_scalar(cond['value'])}")
             if rule.default is not None:
                 lines.append(f"    default: {_yaml_scalar(rule.default)}")
+        elif rule.rule_type == "classifier":
+            lines.append(f"    classifier_type: logistic_regression")
+            lines.append(f"    classes: {json.dumps(rule.classes)}")
+            lines.append(f"    vocabulary: {json.dumps(rule.vocabulary)}")
+            lines.append(f"    weights: {json.dumps(rule.weights)}")
+            lines.append(f"    bias: {json.dumps(rule.bias)}")
+            if rule.structured_features:
+                sf_str = pyyaml.dump(rule.structured_features, default_flow_style=True).strip()
+                lines.append(f"    structured_features: {sf_str}")
+            lines.append(f"    confidence_threshold: {rule.confidence_threshold}")
         elif rule.pattern:
             yaml_str = pyyaml.dump(rule.pattern, default_style='"').strip()
             lines.append(f"    pattern: {yaml_str}")
@@ -1032,6 +1243,8 @@ def format_synthesis_report(result: SynthesisResult) -> str:
         lines.append(f"  Probes used:              {s['probes_used']}")
     if "tier2_discovered" in s:
         lines.append(f"  Tier 2 discovered:        {s['tier2_discovered']}")
+    if "tier3_discovered" in s and s["tier3_discovered"] > 0:
+        lines.append(f"  Tier 3 classifiers:       {s['tier3_discovered']}")
     if s['total_fields'] > 0:
         total_rules = len([r for r in result.rules if r.rule_type not in ("llm_required",)])
         pct = total_rules / s['total_fields'] * 100
@@ -1073,6 +1286,22 @@ def format_synthesis_report(result: SynthesisResult) -> str:
                     lines.append(f"          when {cond['when']} → {cond['value']}")
                 if r.default is not None:
                     lines.append(f"          default: {r.default}")
+            lines.append("")
+
+    # Show Tier 3 rules
+    tier3_rules = [r for r in result.rules if r.rule_type == "classifier"]
+    if tier3_rules:
+        lines.append("  TIER 3 RULES (classifier):")
+        lines.append("  " + "-" * 66)
+        for r in tier3_rules:
+            lines.append(f"  [ OK ] {r.path:<35} classifier CV={r.confidence:.0%}")
+            lines.append(f"          classes: {r.classes}")
+            lines.append(f"          vocab: {len(r.vocabulary)} words, "
+                         f"weights: {len(r.classes)}x{len(r.vocabulary)} matrix")
+            lines.append(f"          confidence_threshold: {r.confidence_threshold}")
+            if r.structured_features:
+                sf_names = [sf["source"] for sf in r.structured_features]
+                lines.append(f"          structured: {sf_names}")
             lines.append("")
 
     # Show LLM-required fields
