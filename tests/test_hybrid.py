@@ -196,6 +196,60 @@ def test_conditional_with_regex_pipeline():
     assert extracted["assessment"]["severity"] == "P3"
 
 
+def test_keyword_rule_matches_best_category():
+    rule = {
+        "path": "assessment.root_cause",
+        "type": "keyword",
+        "keywords": {
+            "network": ["printer", "disconnecting", "connectivity"],
+            "software_bug": ["error", "crash", "update"],
+        },
+        "default": "unknown",
+    }
+    text = "The network printer keeps disconnecting from the network"
+    result = execute_rule(rule, text, {})
+    assert result.matched
+    assert result.value == "network"
+
+
+def test_keyword_rule_case_insensitive():
+    rule = {
+        "path": "root_cause",
+        "type": "keyword",
+        "keywords": {
+            "software_bug": ["ERROR", "crash"],
+        },
+        "default": "other",
+    }
+    result = execute_rule(rule, "Application error on startup", {})
+    assert result.value == "software_bug"
+
+
+def test_keyword_rule_no_match_uses_default():
+    rule = {
+        "path": "root_cause",
+        "type": "keyword",
+        "keywords": {
+            "network": ["printer", "switch"],
+        },
+        "default": "unknown",
+    }
+    result = execute_rule(rule, "Please reset my password", {})
+    assert result.value == "unknown"
+
+
+def test_keyword_rule_no_match_no_default():
+    rule = {
+        "path": "root_cause",
+        "type": "keyword",
+        "keywords": {
+            "network": ["printer"],
+        },
+    }
+    result = execute_rule(rule, "Please reset my password", {})
+    assert not result.matched
+
+
 # --- Executor tests ---
 
 def test_deep_merge_simple():
