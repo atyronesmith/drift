@@ -250,6 +250,99 @@ def test_keyword_rule_no_match_no_default():
     assert not result.matched
 
 
+# --- Classifier rule tests ---
+
+CLASSIFIER_RULE = {
+    "path": "assessment.root_cause_category",
+    "type": "classifier",
+    "classifier_type": "logistic_regression",
+    "vocabulary": ["printer", "network", "disconnect", "password", "reset", "access"],
+    "weights": [
+        [2.0, 1.5, 1.0, -1.0, -1.0, -1.0, 0.0, 0.0],  # network
+        [-1.0, -1.0, -1.0, 2.0, 1.5, 1.0, 0.0, 0.0],   # access_control
+    ],
+    "bias": [0.0, 0.0],
+    "classes": ["network", "access_control"],
+    "structured_features": [
+        {"source": "ticket.stated_category", "categories": ["Network", "Account"]},
+    ],
+    "confidence_threshold": 0.70,
+}
+
+
+def test_classifier_rule_high_confidence():
+    """Classifier predicts network with high confidence from keyword overlap."""
+    text = "The network printer keeps disconnecting from the network"
+    extracted = {"ticket": {"stated_category": "Network"}}
+    result = execute_rule(CLASSIFIER_RULE, text, extracted)
+    assert result.matched
+    assert result.value == "network"
+
+
+def test_classifier_rule_access_control():
+    text = "I forgot my password and need to reset access to my account"
+    extracted = {"ticket": {"stated_category": "Account"}}
+    result = execute_rule(CLASSIFIER_RULE, text, extracted)
+    assert result.matched
+    assert result.value == "access_control"
+
+
+def test_classifier_rule_below_threshold():
+    """Ambiguous input should fall below confidence threshold."""
+    rule = dict(CLASSIFIER_RULE, confidence_threshold=0.99)
+    # Text with mixed signals from both categories
+    text = "network password reset disconnect access printer"
+    result = execute_rule(rule, text, {})
+    assert not result.matched  # should escalate to LLM
+
+
+def test_classifier_rule_structured_features():
+    """Structured features (one-hot) contribute to classification."""
+    text = "generic issue with system"  # no vocab words match
+    # With structured feature pushing toward network
+    rule = {
+        "path": "assessment.root_cause_category",
+        "type": "classifier",
+        "vocabulary": ["zzz_unlikely_word"],
+        "weights": [
+            [0.0, 3.0, -1.0],  # network: strong weight on Network category
+            [0.0, -1.0, 3.0],  # access_control: strong weight on Account category
+        ],
+        "bias": [0.0, 0.0],
+        "classes": ["network", "access_control"],
+        "structured_features": [
+            {"source": "ticket.category", "categories": ["Network", "Account"]},
+        ],
+        "confidence_threshold": 0.70,
+    }
+    result = execute_rule(rule, text, {"ticket": {"category": "Network"}})
+    assert result.matched
+    assert result.value == "network"
+
+
+def test_classifier_rule_in_pipeline():
+    """Classifier rule works in execute_rules pipeline with prior extractions."""
+    rules = [
+        {"path": "ticket.stated_category", "type": "regex",
+         "pattern": r"Category:\s*(\S+)\s*$"},
+        {
+            "path": "assessment.root_cause_category",
+            "type": "classifier",
+            "vocabulary": ["printer", "disconnect"],
+            "weights": [[2.0, 1.5], [-1.0, -1.0]],
+            "bias": [0.0, 0.0],
+            "classes": ["network", "access_control"],
+            "structured_features": [],
+            "confidence_threshold": 0.60,
+        },
+    ]
+    text = "Category:     Network\nThe printer keeps disconnecting"
+    extracted, results = execute_rules(rules, text)
+    assert extracted["ticket"]["stated_category"] == "Network"
+    assert extracted["assessment"]["root_cause_category"] == "network"
+    assert results[1].matched
+
+
 # --- Executor tests ---
 
 def test_deep_merge_simple():

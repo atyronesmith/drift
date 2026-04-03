@@ -34,9 +34,11 @@ def compile_engine(
     literal_rules = [r for r in rules if r["type"] == "literal"]
     mapping_rules = [r for r in rules if r["type"] == "mapping"]
     conditional_rules = [r for r in rules if r["type"] == "conditional"]
+    classifier_rules = [r for r in rules if r["type"] == "classifier"]
 
     tier1_count = len(regex_rules) + len(regex_all_rules) + len(literal_rules)
     tier2_count = len(mapping_rules) + len(conditional_rules)
+    tier3_count = len(classifier_rules)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -49,10 +51,13 @@ def compile_engine(
     lines.append(f"Generated at: {timestamp}")
     lines.append(f"Tier 1 (regex/literal): {tier1_count} fields")
     lines.append(f"Tier 2 (mapping/conditional): {tier2_count} fields")
-    lines.append(f"Tier 3 (LLM): {len(llm_fields)} field groups")
+    lines.append(f"Tier 3 (classifier): {tier3_count} fields")
+    lines.append(f"Tier 4 (LLM): {len(llm_fields)} field groups")
     lines.append(f'"""')
     lines.append(f"")
     lines.append(f"import json")
+    if classifier_rules:
+        lines.append(f"import math")
     lines.append(f"import re")
     lines.append(f"")
     lines.append(f"")
@@ -62,6 +67,21 @@ def compile_engine(
     lines.append(f"")
     lines.append(f"LLM_FIELDS = {llm_fields!r}")
     lines.append(f"")
+
+    # Classifier constants
+    for rule in classifier_rules:
+        field_id = _field_id(rule["path"])
+        lines.append(f"")
+        lines.append(f"# Classifier: {rule['path']}")
+        lines.append(f"_CLF_{field_id}_VOCAB = {rule['vocabulary']!r}")
+        lines.append(f"_CLF_{field_id}_WEIGHTS = {rule['weights']!r}")
+        lines.append(f"_CLF_{field_id}_BIAS = {rule['bias']!r}")
+        lines.append(f"_CLF_{field_id}_CLASSES = {rule['classes']!r}")
+        lines.append(f"_CLF_{field_id}_THRESHOLD = {rule.get('confidence_threshold', 0.95)!r}")
+        if rule.get("structured_features"):
+            lines.append(f"_CLF_{field_id}_STRUCTURED = {rule['structured_features']!r}")
+        lines.append(f"")
+
     lines.append(f"")
 
     # --- process() function ---
@@ -134,11 +154,32 @@ def compile_engine(
             lines.append(f"        _set(result, {path!r}, {default!r})")
         lines.append(f"")
 
-    # Tier 3: LLM call
+    # Tier 3: Classifier rules
+    if classifier_rules:
+        lines.append(f"    # --- Tier 3: Classifier (< 1ms, confidence-gated) ---")
+        lines.append(f"    _escalated = []")
+        for rule in classifier_rules:
+            field_id = _field_id(rule["path"])
+            path = rule["path"]
+            has_sf = bool(rule.get("structured_features"))
+            lines.append(f"    _clf_val, _clf_conf = _classify_{field_id}(input_text{', result' if has_sf else ''})")
+            lines.append(f"    if _clf_val is not None:")
+            lines.append(f"        _set(result, {path!r}, _clf_val)")
+            lines.append(f"    else:")
+            lines.append(f"        _escalated.append({path!r})")
+        lines.append(f"")
+
+    # Tier 4: LLM call
     if llm_fields:
-        lines.append(f"    # --- Tier 3: LLM for reasoning fields ---")
-        lines.append(f"    if llm:")
-        lines.append(f"        _llm_result = _call_llm(llm, input_text, result)")
+        if classifier_rules:
+            lines.append(f"    # --- Tier 4: LLM for reasoning fields + escalations ---")
+            lines.append(f"    _llm_fields = LLM_FIELDS + _escalated")
+            lines.append(f"    if llm and _llm_fields:")
+            lines.append(f"        _llm_result = _call_llm(llm, input_text, result, _llm_fields)")
+        else:
+            lines.append(f"    # --- Tier 4: LLM for reasoning fields ---")
+            lines.append(f"    if llm:")
+            lines.append(f"        _llm_result = _call_llm(llm, input_text, result)")
         lines.append(f"        _merge(result, _llm_result)")
         lines.append(f"")
 
@@ -147,6 +188,47 @@ def compile_engine(
     lines.append(f"")
 
     # --- Helper functions ---
+
+    # Classifier functions
+    for rule in classifier_rules:
+        field_id = _field_id(rule["path"])
+        has_sf = bool(rule.get("structured_features"))
+        sf_param = ", extracted: dict" if has_sf else ""
+        lines.append(f"def _classify_{field_id}(text: str{sf_param}) -> tuple[str | None, float]:")
+        lines.append(f'    """Logistic regression classifier for {rule["path"]}."""')
+        lines.append(f"    words = set(re.findall(r'[a-z]+', text.lower()))")
+        # Feature vector size
+        n_sf = sum(len(sf["categories"]) for sf in rule.get("structured_features", []))
+        n_total = len(rule["vocabulary"]) + n_sf
+        lines.append(f"    features = [0.0] * {n_total}")
+        lines.append(f"    for i, w in enumerate(_CLF_{field_id}_VOCAB):")
+        lines.append(f"        if w in words:")
+        lines.append(f"            features[i] = 1.0")
+        if has_sf:
+            offset = len(rule["vocabulary"])
+            for sf in rule["structured_features"]:
+                source = sf["source"]
+                cats = sf["categories"]
+                lines.append(f"    _sv = _get(extracted, {source!r})")
+                for j, cat in enumerate(cats):
+                    lines.append(f"    if str(_sv) == {str(cat)!r}:")
+                    lines.append(f"        features[{offset + j}] = 1.0")
+                offset += len(cats)
+        lines.append(f"    n_classes = len(_CLF_{field_id}_CLASSES)")
+        lines.append(f"    logits = [_CLF_{field_id}_BIAS[c] + sum(")
+        lines.append(f"        _CLF_{field_id}_WEIGHTS[c][j] * features[j]")
+        lines.append(f"        for j, fv in enumerate(features) if fv != 0")
+        lines.append(f"    ) for c in range(n_classes)]")
+        lines.append(f"    mx = max(logits)")
+        lines.append(f"    exps = [math.exp(l - mx) for l in logits]")
+        lines.append(f"    total = sum(exps)")
+        lines.append(f"    probs = [e / total for e in exps]")
+        lines.append(f"    best = max(range(n_classes), key=lambda i: probs[i])")
+        lines.append(f"    if probs[best] >= _CLF_{field_id}_THRESHOLD:")
+        lines.append(f"        return _CLF_{field_id}_CLASSES[best], probs[best]")
+        lines.append(f"    return None, probs[best]")
+        lines.append(f"")
+        lines.append(f"")
 
     # _extract
     lines.append(f"def _extract(pattern: str, text: str) -> str | None:")
@@ -202,9 +284,14 @@ def compile_engine(
         lines.append(f"")
 
         # _call_llm
-        lines.append(f"def _call_llm(llm, input_text: str, extracted: dict) -> dict:")
-        lines.append(f'    """Call LLM for reasoning fields only."""')
-        lines.append(f"    fields_str = ', '.join(LLM_FIELDS)")
+        if classifier_rules:
+            lines.append(f"def _call_llm(llm, input_text: str, extracted: dict, fields: list[str] | None = None) -> dict:")
+            lines.append(f'    """Call LLM for reasoning fields + escalated classifier fields."""')
+            lines.append(f"    fields_str = ', '.join(fields or LLM_FIELDS)")
+        else:
+            lines.append(f"def _call_llm(llm, input_text: str, extracted: dict) -> dict:")
+            lines.append(f'    """Call LLM for reasoning fields only."""')
+            lines.append(f"    fields_str = ', '.join(LLM_FIELDS)")
         lines.append(f"    extracted_json = json.dumps(extracted, indent=2)")
         lines.append(f"    prompt = (")
         lines.append(f'        "The following fields have already been extracted:\\n"')
@@ -257,6 +344,11 @@ def _quote_multiline(s: str) -> str:
     """Quote a multiline string as a Python triple-quoted string."""
     escaped = s.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
     return f'"""\\\n{escaped}"""'
+
+
+def _field_id(path: str) -> str:
+    """Convert a dot-separated path to a valid Python identifier."""
+    return path.replace(".", "_").upper()
 
 
 def _emit_pattern(pattern: str) -> str:
