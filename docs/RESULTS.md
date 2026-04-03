@@ -719,3 +719,100 @@ All 5 remaining disagreements are genuine judgment calls where both assignments 
 3. **50% agreement on classification + 72% speedup is the practical ceiling for a residual small model.** Further improvement would require fine-tuning or a larger model. The rules already handle the easy deterministic work — the remaining 4 fields genuinely require reasoning capacity.
 
 4. **root_cause_category stays at 50% despite already being enumerated.** This confirms that root cause analysis is genuine reasoning — the models weigh ticket evidence differently (e.g., "configuration" vs "software_bug" for the same email client issue). No amount of prompt engineering will make a 8B model agree with a 32B model on ambiguous classification.
+
+## Experiment 11: Attention-Based Keyword Discovery
+
+**Date**: 2026-04-02
+
+**Goal**: Extract discriminative keywords from MLX attention weights to build keyword-based classification rules for `root_cause_category`.
+
+### Setup
+
+- **Model**: mlx-community/Qwen2.5-32B-Instruct-4bit (local Apple Silicon)
+- **Method**: For each ticket, probe attention from `root_cause_category` output tokens back to description words. Aggregate per-word attention across tickets per category, then compute TF-IDF-style discriminative scores.
+- **Tickets**: 50
+
+### Results
+
+| Metric | Value |
+|--------|-------|
+| Keyword classifier accuracy | **64%** |
+| Categories found | 7 |
+| Mean attention per word | 0.001–0.010 |
+
+### Key Takeaways
+
+1. **Attention is too diffuse for keyword extraction.** The model distributes attention broadly across the description rather than focusing on specific trigger words. Per-word weights are tiny (0.001–0.010).
+
+2. **Classification genuinely requires holistic reasoning.** The model doesn't classify by spotting keywords — it synthesizes meaning across the full ticket. This is why keyword rules can't match LLM performance.
+
+3. **Field-level attention mapping still works.** The earlier finding that severity attends to priority (leading to the mapping rule) is valid because that's a 1:1 structural relationship, not a classification task.
+
+## Experiment 12: Classifier Distillation POC
+
+**Date**: 2026-04-03
+
+**Goal**: Train small classifiers on LLM-labeled data to replace LLM inference for classification fields (`root_cause_category`, `assignment_group`). Use confidence-gated escalation: high-confidence predictions bypass LLM, low-confidence escalates.
+
+### Setup
+
+- **Oracle model**: qwen2.5:32b via Ollama (labels 400 tickets)
+- **Features**: 150-word bag-of-words (binary) + priority one-hot (4) + category one-hot (11) = 165 features
+- **Classifiers**: Logistic regression (C=0.5), decision tree (max_depth=5), gradient-boosted trees (100 estimators)
+- **Validation**: 5-fold stratified CV + 80/20 hold-out test split
+
+### Results — root_cause_category (8 classes)
+
+| Classifier | CV Accuracy | Test Accuracy |
+|-----------|------------|---------------|
+| Logistic Regression | 74.4% | 67.5% |
+| Decision Tree | 73.1% | 57.5% |
+| Gradient Boosted | 70.3% | 57.5% |
+
+**Confidence calibration (logistic regression):**
+
+| Threshold | Coverage | Accuracy |
+|-----------|----------|----------|
+| ≥ 0.50 | 84% | 77.6% |
+| ≥ 0.70 | 51% | 85.4% |
+| ≥ 0.80 | 42% | 88.2% |
+| ≥ 0.90 | 25% | **95.0%** |
+| ≥ 0.95 | 14% | **100%** |
+
+### Results — assignment_group (10 classes, after dropping singletons)
+
+| Classifier | CV Accuracy | Test Accuracy |
+|-----------|------------|---------------|
+| Logistic Regression | 74.6% | 78.8% |
+| Decision Tree | 72.7% | 71.2% |
+| Gradient Boosted | 71.1% | 71.2% |
+
+**Confidence calibration (logistic regression):**
+
+| Threshold | Coverage | Accuracy |
+|-----------|----------|----------|
+| ≥ 0.50 | 76% | 83.6% |
+| ≥ 0.70 | 59% | 85.1% |
+| ≥ 0.80 | 46% | 89.2% |
+| ≥ 0.90 | 30% | **95.8%** |
+| ≥ 0.95 | 16% | **100%** |
+
+### Top Features (logistic regression)
+
+Structured one-hot features consistently rank among the most discriminative:
+
+- `category_Network` → network (1.475), `category_Account` → access_control (1.052)
+- `category_Software` → Software Support (1.473), `category_Security` → Security Operations (1.338)
+- BoW words add signal: "access" (1.892), "configurations" (1.414), "connection" (1.176), "instructions" (1.131)
+
+### Key Takeaways
+
+1. **Confidence-gated escalation works.** At 0.90 threshold, classifiers handle 25-30% of tickets at 95%+ accuracy. The rest escalate to LLM with zero accuracy loss.
+
+2. **Logistic regression beats tree-based methods.** With 165 features and 400 samples, decision trees and gradient boosting overfit. LR's L2 regularization handles the high-dimensional sparse feature space better.
+
+3. **Pure-Python inference parity: PASS.** Stdlib-only implementation (dot product + softmax) matches sklearn predictions on all test samples. Generated engines need zero ML dependencies at runtime.
+
+4. **The pipeline tier structure scales.** Tier 1 (regex) → Tier 2 (mapping) → Tier 3 (classifier) → Tier 4 (LLM). Each tier is < 1ms except LLM. Classifiers slot in naturally with the existing escalation mechanism (`matched=False` → LLM handles it).
+
+5. **Net effect**: ~15-30% LLM load reduction on classification fields with near-perfect accuracy. Combined with Tier 1+2 extraction (which already handles 7/12 fields deterministically), the LLM is left with only the genuinely hard reasoning work.
