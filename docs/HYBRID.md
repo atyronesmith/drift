@@ -514,6 +514,38 @@ The hybrid approach **reduces LLM exposure by 60%+**. Fields extracted by rules 
 - **Rule-extracted fields are tamper-proof**: even if the LLM is compromised, the 17+ regex-extracted fields are correct
 - **JSON schema validation** on LLM output constrains what the model can produce, limiting injection impact
 
+## Iterative Refinement
+
+The `drift refine` command automates the engine improvement loop: validate the engine against input files, identify failures, re-probe failing inputs, re-synthesize rules, and recompile.
+
+```bash
+drift refine engine.py --input-dir datasets/ --config experiments/baseline.yaml --max-iter 3
+```
+
+Each iteration:
+1. **Validate** — Run the engine against all input files, tracking per-field extraction rates
+2. **Identify failures** — Find inputs where fields are missing or extraction fails
+3. **Re-probe** — Run the LLM on a sample of failing inputs to get fresh logprob data
+4. **Re-synthesize** — Generate new rules from the broader probe dataset (multi-probe synthesis)
+5. **Recompile** — Build a new engine with the improved rules
+
+The loop terminates when the target extraction rate is reached or max iterations are exhausted. In testing, an intentionally broken engine (category regex matching only "Network") was fixed in one iteration (20% → 100% extraction rate).
+
+## Constrained Generation for Classification Fields
+
+Enum constraints in the system prompt dramatically improve cross-model consistency on classification fields. Without an enum, different models (and even the same model across tickets) invent their own vocabulary:
+
+```
+Without enum:                          With enum:
+  "Security Configuration Team"         "Security Operations"
+  "Security Team"                        "Security Operations"
+  "Security Configuration"              "Security Operations"
+```
+
+Adding `(one of: Access Management, Account Management, ...)` to the assignment_group field in the prompt improved llama3.1:8b agreement with qwen2.5:32b from 10% to 50%. The remaining disagreements are genuine judgment calls, not naming drift.
+
+**Recommendation**: Always enumerate valid values for classification fields in prompts. This benefits all model sizes and makes cross-model comparisons meaningful.
+
 ## Limitations and Future Work
 
 **Tabular data**: The auto-generator struggles with invoice line items and grid data. Short values (quantities, prices) match multiple places in the input, causing regex to anchor on wrong positions. Tabular extraction needs a different strategy (column-aware parsing, not regex).

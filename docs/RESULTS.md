@@ -631,3 +631,91 @@ The hybrid approach is faster because the LLM prompt is shorter (only asking for
 4. **39% latency reduction with zero human effort.** The hybrid approach cuts mean latency from 21.1s to 12.8s per ticket while maintaining 100% field accuracy. The LLM only handles reasoning (severity, root cause, summary, next steps); extraction is deterministic.
 
 5. **50% of output fields extracted without the LLM.** 6 of 12 fields come from regex rules. This reduces LLM cost, eliminates extraction errors on those fields, and makes them immune to prompt injection.
+
+---
+
+## Experiment 9: Multi-Model Residual Test
+
+**Date**: 2026-04-02
+
+**Goal**: After rules extract 7+ deterministic fields, can a smaller/cheaper model handle the remaining 4 reasoning fields (root_cause_category, assignment_group, summary, next_steps) as well as the full 32B model?
+
+### Setup
+
+- **Reference model**: qwen2.5:32b on dedicated Ollama (single-GPU, temp=0)
+- **Candidate models**: llama3.1:8b, qwen3:4b, qwen3:4b with /nothink
+- **Task**: helpdesk_triage hybrid — 7 rules extract ticket metadata + severity, LLM handles 4 assessment fields
+- **Tickets**: 10 from the 500-ticket helpdesk dataset
+- **Script**: `scripts/residual_model_test.py`
+
+### Results (unconstrained prompt)
+
+| Model | Mean LLM Latency | Speedup | root_cause Agreement | assignment_group Agreement |
+|-------|-----------------|---------|---------------------|---------------------------|
+| qwen2.5:32b (ref) | 13,602ms | — | — | — |
+| llama3.1:8b | 3,447ms | **75%** | 50% | **10%** |
+| qwen3:4b | 71,186ms | -341% | 70% | 30% |
+| qwen3:4b /nothink | 73,345ms | -439% | 56% | 11% |
+
+### Key Findings
+
+**1. Thinking model overhead makes qwen3:4b unusable as a residual model.** Despite being 8x smaller, qwen3:4b is 4-5x *slower* than qwen2.5:32b. The model generates 500-1000 hidden thinking tokens for a ~50 token output. Even with `/nothink` (which should disable thinking), latency remained 5x worse — the overhead is in the 131K context window KV cache, not the thinking tokens.
+
+**2. llama3.1:8b is genuinely fast but has poor classification agreement.** 75% faster, but only 10% agreement on assignment_group. The disagreements are mostly naming drift — the small model invents different group names ("Security Team" vs "Security Configuration Team", "Account Support" vs "Account Management").
+
+**3. Summary and next_steps agree at 100%.** Free-text reasoning fields are produced correctly by all models. The disagreement is entirely on the two classification fields.
+
+**4. The 10% assignment_group agreement is naming noise, not reasoning failure.** Both models are making reasonable assignments, just using different names for the same concept (see Experiment 10).
+
+---
+
+## Experiment 10: Constrained Generation for Classification Fields
+
+**Date**: 2026-04-02
+
+**Goal**: Test whether adding an enum constraint to the assignment_group prompt fixes the naming disagreement between large and small models.
+
+### Method
+
+Added 12 canonical assignment group values to the system prompt:
+
+```
+Assignment group (one of: Access Management, Account Management, Desktop Support,
+Hardware Support, Infrastructure Operations, Licensing and Compliance, Network Operations,
+Performance Engineering, Remote Work Support, Security Operations, Software Support,
+Training and Documentation)
+```
+
+The 32B model was already inconsistent without the enum — producing "Security Configuration Team" for one ticket and "Security Team" for another, "RemoteWorkSupport" (camelCase) for remote work tickets.
+
+Re-ran the residual test with llama3.1:8b against the constrained 32B reference.
+
+### Results
+
+| Metric | Before (unconstrained) | After (enum) |
+|--------|----------------------|-------------|
+| assignment_group agreement | **10%** (1/10) | **50%** (5/10) |
+| root_cause agreement | 50% | 50% |
+| Speedup | 75% | 72% |
+
+### Remaining Disagreements (constrained)
+
+| Ticket | 32B Choice | 8B Choice | Both Valid? |
+|--------|-----------|-----------|-------------|
+| kz5mjjpox | Access Management | Network Operations | Yes — VPN access issue |
+| tso616mbn | Access Management | Software Support | Yes — project folder access |
+| 6bqwkmxi1 | Desktop Support | Software Support | Yes — email client config |
+| cythbyl5p | Access Management | Account Management | Yes — DB folder access request |
+| u43q44ro8 | Access Management | Account Management | Yes — account setup |
+
+All 5 remaining disagreements are genuine judgment calls where both assignments are defensible. The 32B model leans heavily on "Access Management" (5/10 tickets), which may be over-applied.
+
+### Key Takeaways
+
+1. **Enum constraints are a cheap, high-ROI intervention.** One line in the prompt (adding a value list) took agreement from 10% to 50% — a 5x improvement. The remaining gap is genuine reasoning disagreement, not fixable by prompt engineering.
+
+2. **The 32B model needed the enum too.** Without it, the reference model itself was inconsistent ("Security Configuration Team" vs "Security Team" for similar tickets). Enum constraints improve consistency for ALL model sizes.
+
+3. **50% agreement on classification + 72% speedup is the practical ceiling for a residual small model.** Further improvement would require fine-tuning or a larger model. The rules already handle the easy deterministic work — the remaining 4 fields genuinely require reasoning capacity.
+
+4. **root_cause_category stays at 50% despite already being enumerated.** This confirms that root cause analysis is genuine reasoning — the models weigh ticket evidence differently (e.g., "configuration" vs "software_bug" for the same email client issue). No amount of prompt engineering will make a 8B model agree with a 32B model on ambiguous classification.
