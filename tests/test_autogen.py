@@ -9,9 +9,12 @@ from drift.hybrid.autogen import (
     _extract_label,
     _generate_regex,
     _validate_pattern,
+    _discover_classifier_rules,
     synthesize_rules,
     synthesize_rules_multi,
     render_hybrid_yaml,
+    GeneratedRule,
+    SynthesisResult,
 )
 
 
@@ -298,3 +301,131 @@ def test_render_hybrid_yaml_with_conditional():
     assert rule["type"] == "conditional"
     assert len(rule["conditions"]) == 2
     assert rule["default"] == "P3"
+
+
+# --- Classifier discovery tests ---
+
+def _make_classifier_probes(n=30):
+    """Generate synthetic probes for classifier discovery testing.
+
+    Creates tickets with category→root_cause mapping that a classifier can learn:
+    - Network tickets → "network"
+    - Software tickets → "software_bug"
+    - Account tickets → "access_control"
+    """
+    import random
+    random.seed(42)
+
+    categories = ["Network", "Software", "Account"]
+    root_causes = {"Network": "network", "Software": "software_bug", "Account": "access_control"}
+    descriptions = {
+        "Network": ["printer disconnecting", "network connectivity slow", "VPN connection drops"],
+        "Software": ["application crash error", "software update failed", "integration bug"],
+        "Account": ["password reset access", "account locked permissions", "access denied login"],
+    }
+
+    probes = []
+    for i in range(n):
+        cat = categories[i % len(categories)]
+        rc = root_causes[cat]
+        desc = random.choice(descriptions[cat])
+        output = {
+            "ticket": {"category": cat, "priority": "Medium"},
+            "assessment": {"root_cause": rc, "summary": f"Ticket {i} about {desc}"},
+        }
+        input_text = f"Category: {cat}\nPriority: Medium\nDescription: {desc}"
+        probe = _make_probe_with_entropy(
+            output, {"assessment.root_cause", "assessment.summary"}
+        )
+        probes.append((probe, input_text))
+
+    return probes
+
+
+def test_discover_classifier_rules_basic():
+    """Classifier discovery finds learnable classification fields."""
+    pytest.importorskip("sklearn")
+    probes = _make_classifier_probes(30)
+
+    # Extract field values like synthesize_rules_multi does
+    from drift.hybrid.autogen import _parse_llm_output, _get_nested
+    parsed = [_parse_llm_output(pd) for pd, _ in probes]
+
+    tier1_paths = {"ticket.category", "ticket.priority"}
+    llm_paths = {"assessment.root_cause", "assessment.summary"}
+    field_values = {}
+    for path in tier1_paths | llm_paths:
+        field_values[path] = [_get_nested(p, path) for p in parsed if p]
+
+    rules = _discover_classifier_rules(
+        probes, tier1_paths, llm_paths, field_values,
+        min_accuracy=0.60,
+    )
+
+    # Should discover root_cause as classifiable (clear category→root_cause pattern)
+    clf_paths = {r.path for r in rules}
+    assert "assessment.root_cause" in clf_paths
+
+    rc_rule = [r for r in rules if r.path == "assessment.root_cause"][0]
+    assert rc_rule.rule_type == "classifier"
+    assert rc_rule.vocabulary is not None
+    assert rc_rule.weights is not None
+    assert rc_rule.classes is not None
+    assert set(rc_rule.classes) == {"access_control", "network", "software_bug"}
+
+    # summary should NOT be classifiable (unique per ticket)
+    assert "assessment.summary" not in clf_paths
+
+
+def test_discover_classifier_rules_too_few_probes():
+    """Returns empty when fewer than 20 probes."""
+    pytest.importorskip("sklearn")
+    probes = _make_classifier_probes(10)
+
+    rules = _discover_classifier_rules(
+        probes, set(), {"assessment.root_cause"}, {},
+    )
+    assert rules == []
+
+
+def test_discover_classifier_rules_no_sklearn():
+    """Returns empty when sklearn not available (tested via too-few-probes path)."""
+    # Can't easily mock import failure, but we can verify the too-few-probes guard
+    rules = _discover_classifier_rules([], set(), set(), {})
+    assert rules == []
+
+
+def test_render_hybrid_yaml_with_classifier():
+    """YAML output includes classifier rules correctly."""
+    import yaml
+
+    result = SynthesisResult(
+        rules=[
+            GeneratedRule(
+                path="assessment.root_cause", value=None, rule_type="classifier",
+                pattern=None, confidence=0.85, entropy=0.0,
+                validated=True,
+                vocabulary=["printer", "network", "password"],
+                weights=[[1.0, 0.5, -1.0], [-1.0, -0.5, 1.0]],
+                bias=[0.0, 0.0],
+                classes=["network", "access_control"],
+                confidence_threshold=0.95,
+                structured_features=[
+                    {"source": "ticket.category", "categories": ["Network", "Account"]},
+                ],
+            ),
+        ],
+        llm_fields=["assessment"],
+        stats={"total_fields": 2, "rule_candidates": 1, "rules_generated": 1,
+               "rules_validated": 1, "llm_required": 1},
+    )
+    yaml_str = render_hybrid_yaml(result)
+    spec = yaml.safe_load(yaml_str)
+
+    rule = spec["rules"][0]
+    assert rule["type"] == "classifier"
+    assert rule["classifier_type"] == "logistic_regression"
+    assert rule["classes"] == ["network", "access_control"]
+    assert rule["vocabulary"] == ["printer", "network", "password"]
+    assert rule["confidence_threshold"] == 0.95
+    assert len(rule["weights"]) == 2

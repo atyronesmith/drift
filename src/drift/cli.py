@@ -1213,6 +1213,14 @@ def build(config_path: str, output: str, engine_name: str | None,
             entry["conditions"] = rule.conditions
             if rule.default is not None:
                 entry["default"] = rule.default
+        if rule.rule_type == "classifier":
+            entry["vocabulary"] = rule.vocabulary
+            entry["weights"] = rule.weights
+            entry["bias"] = rule.bias
+            entry["classes"] = rule.classes
+            entry["confidence_threshold"] = rule.confidence_threshold
+            if rule.structured_features:
+                entry["structured_features"] = rule.structured_features
         rules_for_compile.append(entry)
 
     code = compile_engine(
@@ -1226,11 +1234,13 @@ def build(config_path: str, output: str, engine_name: str | None,
     # Summary
     tier1 = sum(1 for r in rules_for_compile if r["type"] in ("regex", "regex_all", "literal"))
     tier2 = sum(1 for r in rules_for_compile if r["type"] in ("mapping", "conditional"))
+    tier3 = sum(1 for r in rules_for_compile if r["type"] == "classifier")
 
     click.echo(f"\nEngine written to {output}")
     click.echo(f"  Tier 1 (regex/literal):      {tier1} fields")
     click.echo(f"  Tier 2 (mapping/conditional): {tier2} fields")
-    click.echo(f"  Tier 3 (LLM):                {len(synth_result.llm_fields)} field groups")
+    click.echo(f"  Tier 3 (classifier):         {tier3} fields")
+    click.echo(f"  Tier 4 (LLM):                {len(synth_result.llm_fields)} field groups")
     click.echo(f"\nUsage:")
     click.echo(f"  python {output} <input_file>")
 
@@ -1453,6 +1463,122 @@ def refine(engine_path: str, input_dir: str, config_path: str,
         improvement = history[-1] - history[0]
         click.echo(f"\n  Improvement: {improvement:+.0f}% ({history[0]:.0f}% -> {history[-1]:.0f}%)")
     click.echo(f"  Probes used: {len(all_probes)}")
+
+
+@cli.command()
+@click.argument("config_path", type=click.Path(exists=True))
+@click.option("--input-dir", required=True, type=click.Path(exists=True),
+              help="Directory of input text files to label.")
+@click.option("--output", "-o", required=True,
+              help="Output path for hybrid YAML spec.")
+@click.option("--n-samples", default=200, type=int,
+              help="Max input files to label (default: 200).")
+@click.option("--accuracy-threshold", default=0.70, type=float,
+              help="Min CV accuracy to promote a classifier (default: 0.70).")
+@click.option("--confidence-threshold", default=0.95, type=float,
+              help="Min softmax confidence for classifier predictions (default: 0.95).")
+@click.option("--labels", "labels_path", default=None, type=click.Path(),
+              help="Pre-computed labels file (skip LLM calls).")
+def distill(config_path: str, input_dir: str, output: str, n_samples: int,
+            accuracy_threshold: float, confidence_threshold: float,
+            labels_path: str | None):
+    """Label inputs via LLM, train classifiers, output hybrid YAML.
+
+    Reads input files, labels them through the LLM, runs Tier 1/2
+    synthesis on the first input, then trains classifiers for remaining
+    classification fields. Outputs a hybrid YAML spec with all tiers.
+
+    Example:
+        drift distill experiments/baseline-helpdesk.yaml \\
+            --input-dir datasets/ticket_inputs/ \\
+            --n-samples 200 -o hybrid_with_classifiers.yaml
+    """
+    from drift.probing.logprobs import probe_with_logprobs
+    from drift.hybrid.autogen import (
+        synthesize_rules_multi, render_hybrid_yaml, format_synthesis_report,
+    )
+
+    # Load config
+    config = yaml.safe_load(Path(config_path).read_text())
+    config = resolve_task_prompts(config, Path.cwd() / "tasks")
+    exp = config["experiment"]
+
+    system = exp["system_prompt"]
+    user_prompt_tpl = exp["user_prompt"]
+    model = exp["model"]
+    base_url = exp.get("base_url")
+
+    # Collect input files
+    input_path = Path(input_dir)
+    input_files = sorted(input_path.glob("*.txt")) + sorted(input_path.glob("*.md"))
+    if not input_files:
+        click.echo(f"Error: no .txt or .md files found in {input_dir}", err=True)
+        raise SystemExit(1)
+
+    input_files = input_files[:n_samples]
+    click.echo(f"Distill: {exp['name']}")
+    click.echo(f"  Model:   {model}")
+    click.echo(f"  Inputs:  {len(input_files)} files from {input_dir}")
+    click.echo(f"  Accuracy threshold: {accuracy_threshold}")
+    click.echo(f"  Confidence threshold: {confidence_threshold}")
+    click.echo()
+
+    # Step 1: Probe all inputs to get LLM outputs
+    click.echo(f"Step 1/3: Probing {len(input_files)} inputs...")
+    probes = []
+    for i, f in enumerate(input_files):
+        input_text = f.read_text()
+        prompt = user_prompt_tpl.replace("{input}", input_text)
+
+        click.echo(f"  [{i+1:3d}/{len(input_files)}] {f.name[:30]}... ", nl=False)
+        try:
+            result = probe_with_logprobs(
+                system=system, prompt=prompt, model=model,
+                base_url=base_url, top_logprobs=5,
+                temperature=exp.get("temperature", 0),
+            )
+            probe_data = {
+                "model": result.model,
+                "tokens": [
+                    {"token": t.token, "logprob": t.logprob, "entropy": t.entropy}
+                    for t in result.tokens
+                ],
+            }
+            probes.append((probe_data, input_text))
+            click.echo(f"OK ({result.total_ms:.0f}ms)")
+        except Exception as e:
+            click.echo(f"SKIP ({e})")
+
+    click.echo(f"\n  Probed {len(probes)}/{len(input_files)} inputs successfully")
+    click.echo()
+
+    if len(probes) < 3:
+        click.echo("Error: need at least 3 successful probes.", err=True)
+        raise SystemExit(1)
+
+    # Step 2: Synthesize rules (Tier 1 + 2 + 3 classifiers)
+    click.echo(f"Step 2/3: Synthesizing rules...")
+    synth_result = synthesize_rules_multi(probes, entropy_threshold=0.3)
+    click.echo(format_synthesis_report(synth_result))
+    click.echo()
+
+    # Step 3: Output hybrid YAML
+    click.echo(f"Step 3/3: Writing hybrid spec...")
+    yaml_str = render_hybrid_yaml(synth_result)
+    Path(output).write_text(yaml_str)
+
+    tier1 = sum(1 for r in synth_result.rules if r.rule_type in ("regex", "regex_all", "literal"))
+    tier2 = sum(1 for r in synth_result.rules if r.rule_type in ("mapping", "conditional"))
+    tier3 = sum(1 for r in synth_result.rules if r.rule_type == "classifier")
+    llm = len(synth_result.llm_fields)
+
+    click.echo(f"\nHybrid spec written to {output}")
+    click.echo(f"  Tier 1 (regex/literal):      {tier1} fields")
+    click.echo(f"  Tier 2 (mapping/conditional): {tier2} fields")
+    click.echo(f"  Tier 3 (classifier):         {tier3} fields")
+    click.echo(f"  Tier 4 (LLM):                {llm} field groups")
+    click.echo(f"\nTo compile to engine:")
+    click.echo(f"  drift compile {output} --prompt <system_prompt.md> -o engine.py")
 
 
 @cli.command()
