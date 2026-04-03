@@ -34,6 +34,8 @@ def execute_rule(rule: dict, input_text: str, extracted: dict | None = None) -> 
         return _mapping_rule(path, rule, extracted or {})
     elif rule_type == "conditional":
         return _conditional_rule(path, rule, extracted or {})
+    elif rule_type == "keyword":
+        return _keyword_rule(path, rule, input_text)
     else:
         return RuleResult(path=path, value=None, matched=False)
 
@@ -101,6 +103,32 @@ def _conditional_rule(path: str, rule: dict, extracted: dict) -> RuleResult:
         when = condition.get("when", {})
         if _match_conditions(when, extracted):
             return RuleResult(path=path, value=condition["value"], matched=True)
+
+    default = rule.get("default")
+    return RuleResult(path=path, value=default, matched=default is not None)
+
+
+def _keyword_rule(path: str, rule: dict, text: str) -> RuleResult:
+    """Classify based on keyword presence in input text.
+
+    YAML example:
+        - path: assessment.root_cause_category
+          type: keyword
+          field: description
+          keywords:
+            network: ["printer", "disconnecting", "connectivity"]
+            software_bug: ["error", "crash", "update"]
+          default: user_error
+    """
+    text_lower = text.lower()
+    scores = {}
+    for category, words in rule["keywords"].items():
+        scores[category] = sum(1 for w in words if w.lower() in text_lower)
+
+    if scores:
+        best = max(scores, key=scores.get)
+        if scores[best] > 0:
+            return RuleResult(path=path, value=best, matched=True)
 
     default = rule.get("default")
     return RuleResult(path=path, value=default, matched=default is not None)
