@@ -7,7 +7,7 @@ Extract the following from the ticket:
 Then provide your assessment:
 - Severity classification (P1-P4) based on business impact
 - Root cause category (one of: configuration, software_bug, hardware_failure, access_control, network, user_error, training_needed, unknown)
-- Recommended assignment group
+- Assignment group (one of: Access Management, Account Management, Desktop Support, Hardware Support, Infrastructure Operations, Licensing and Compliance, Network Operations, Performance Engineering, Remote Work Support, Security Operations, Software Support, Training and Documentation)
 - Brief summary of the issue (1-2 sentences)
 - Recommended next steps (list of 1-3 actions)
 
