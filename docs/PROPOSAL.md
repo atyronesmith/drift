@@ -249,19 +249,21 @@ These findings have value independent of the optimization pipeline — they info
 
 Drift is a working CLI tool with:
 
-- 8 documented experiments across 5 task types
-- Automated probe → synthesize → compile pipeline (3 commands, zero human effort)
+- 10 documented experiments across 5 task types
+- Automated probe → synthesize → compile → refine pipeline
 - Standalone engine generation (single .py file, no runtime dependency)
+- Iterative refinement loop (`drift refine`) for automated engine improvement
 - 420+ passing tests
 - Validated on 500-ticket dataset with 100% rule generalization
+- Multi-model residual testing showing the floor of compilation (reasoning fields need model capacity)
 
 ## Suggested Next Steps
 
 ### Near-term
 
 1. **Run on internal workloads** — Apply the pipeline to a real task from the team to get production-representative numbers.
-2. **Multi-model residual test** — After compilation, the LLM only handles 4-5 reasoning fields. A smaller, cheaper model (Haiku instead of Sonnet, 7B instead of 32B) may handle that reduced workload — potentially stacking another 50%+ cost reduction on top.
-3. **Broader task coverage** — Test on additional task types (document summarization, config generation, code review) to establish which categories benefit most.
+2. **Broader task coverage** — Test on additional task types (document summarization, config generation, code review) to establish which categories benefit most.
+3. **Pipeline drift protection** — Apply the hybrid approach to multi-step LLM pipelines, where variance compounds across steps.
 
 ### Numbers Worth Getting
 
@@ -269,6 +271,12 @@ Drift is a working CLI tool with:
 - **Reliability at scale**: Run 1000+ identical calls on a production task and measure the actual defect rate from drift
 - **Latency distribution**: p50/p95/p99 latency for hybrid vs. baseline — tail latency matters for user-facing applications
 - **Comparative analysis**: How does this approach compare to guardrails libraries, structured output frameworks, and fine-tuning?
+
+### Completed Investigations
+
+- **Multi-model residual test** — After compilation, can a smaller model handle the remaining reasoning fields? **Result: partially.** An 8B model (llama3.1:8b) is 72% faster on the residual fields but only achieves 50% agreement with the 32B model on classification tasks (root_cause_category, assignment_group), even with enum-constrained prompts. Free-text fields (summary, next_steps) agree at 100%. The hybrid framework's value is in eliminating deterministic work — the remaining reasoning fields genuinely need model capacity.
+- **Enum constraints** — Adding canonical value lists to classification prompts improved cross-model agreement from 10% to 50% with one line of prompt change. This is a cheap, high-ROI intervention for any classification task.
+- **Iterative refinement** — `drift refine` automates the validate → re-probe → re-synthesize → recompile loop, fixing underperforming rules without manual intervention.
 
 ## Summary
 
