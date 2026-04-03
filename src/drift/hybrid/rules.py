@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 
@@ -36,6 +37,8 @@ def execute_rule(rule: dict, input_text: str, extracted: dict | None = None) -> 
         return _conditional_rule(path, rule, extracted or {})
     elif rule_type == "keyword":
         return _keyword_rule(path, rule, input_text)
+    elif rule_type == "classifier":
+        return _classifier_rule(path, rule, input_text, extracted or {})
     else:
         return RuleResult(path=path, value=None, matched=False)
 
@@ -132,6 +135,84 @@ def _keyword_rule(path: str, rule: dict, text: str) -> RuleResult:
 
     default = rule.get("default")
     return RuleResult(path=path, value=default, matched=default is not None)
+
+
+def _classifier_rule(path: str, rule: dict, text: str, extracted: dict) -> RuleResult:
+    """Classify using an inlined logistic regression model.
+
+    Builds a feature vector from bag-of-words (binary) on text plus one-hot
+    structured features from already-extracted fields. Computes logits via
+    dot product, applies softmax, and returns the top class if confidence
+    exceeds the threshold. Below-threshold predictions return matched=False
+    so the field escalates to LLM.
+
+    YAML example:
+        - path: assessment.root_cause_category
+          type: classifier
+          classifier_type: logistic_regression
+          vocabulary: ["access", "account", ...]
+          weights: [[0.12, -0.34, ...], ...]
+          bias: [0.1, -0.2, ...]
+          classes: ["access_control", "configuration", ...]
+          structured_features:
+            - source: ticket.stated_priority
+              categories: [High, Medium, Low, Urgent]
+            - source: ticket.stated_category
+              categories: [Network, Software, Account, ...]
+          confidence_threshold: 0.95
+    """
+    vocab = rule["vocabulary"]
+    weights = rule["weights"]
+    bias = rule["bias"]
+    classes = rule["classes"]
+    threshold = rule.get("confidence_threshold", 0.95)
+
+    # Tokenize input text
+    words = set(re.findall(r"[a-z]+", text.lower()))
+
+    # Build feature vector: bag-of-words (binary)
+    n_vocab = len(vocab)
+    features = [0.0] * (n_vocab + sum(
+        len(sf["categories"]) for sf in rule.get("structured_features", [])
+    ))
+
+    for i, w in enumerate(vocab):
+        if w in words:
+            features[i] = 1.0
+
+    # One-hot structured features
+    offset = n_vocab
+    for sf in rule.get("structured_features", []):
+        source_value = _get_nested(extracted, sf["source"])
+        for j, cat in enumerate(sf["categories"]):
+            if str(source_value) == str(cat):
+                features[offset + j] = 1.0
+        offset += len(sf["categories"])
+
+    # Logits = W @ features + b
+    n_classes = len(classes)
+    logits = [0.0] * n_classes
+    for c in range(n_classes):
+        s = bias[c]
+        for j, fval in enumerate(features):
+            if fval != 0:
+                s += weights[c][j] * fval
+        logits[c] = s
+
+    # Softmax with numerical stability
+    max_logit = max(logits)
+    exp_logits = [math.exp(l - max_logit) for l in logits]
+    total = sum(exp_logits)
+    probs = [e / total for e in exp_logits]
+
+    best_idx = max(range(n_classes), key=lambda i: probs[i])
+    confidence = probs[best_idx]
+
+    if confidence >= threshold:
+        return RuleResult(path=path, value=classes[best_idx], matched=True)
+
+    # Below threshold — escalate to LLM
+    return RuleResult(path=path, value=None, matched=False)
 
 
 def _match_conditions(when: dict, extracted: dict) -> bool:

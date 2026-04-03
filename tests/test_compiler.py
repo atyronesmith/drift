@@ -94,7 +94,8 @@ def test_compiled_engine_has_docstring():
     assert "Auto-generated processing engine: my_engine" in code
     assert "Tier 1 (regex/literal): 3 fields" in code
     assert "Tier 2 (mapping/conditional): 2 fields" in code
-    assert "Tier 3 (LLM): 1 field groups" in code
+    assert "Tier 3 (classifier): 0 fields" in code
+    assert "Tier 4 (LLM): 1 field groups" in code
 
 
 def test_compiled_engine_no_llm_fields():
@@ -103,6 +104,66 @@ def test_compiled_engine_no_llm_fields():
     assert "_call_llm" not in code
     assert "_parse_json" not in code
     assert "_merge" not in code
+
+
+CLASSIFIER_RULE = {
+    "path": "assessment.root_cause",
+    "type": "classifier",
+    "classifier_type": "logistic_regression",
+    "vocabulary": ["printer", "network", "disconnect", "password", "reset", "access"],
+    "weights": [
+        [2.0, 1.5, 1.0, -1.0, -1.0, -1.0, 0.0, 0.0],  # network
+        [-1.0, -1.0, -1.0, 2.0, 1.5, 1.0, 0.0, 0.0],   # access_control
+    ],
+    "bias": [0.0, 0.0],
+    "classes": ["network", "access_control"],
+    "structured_features": [
+        {"source": "ticket.priority", "categories": ["High", "Medium"]},
+    ],
+    "confidence_threshold": 0.70,
+}
+
+
+def test_compile_classifier_produces_valid_python():
+    rules = SAMPLE_RULES + [CLASSIFIER_RULE]
+    code = compile_engine(rules, ["summary"], "You are a bot.", "test_clf")
+    compile(code, "<test>", "exec")
+
+
+def test_compiled_classifier_predicts():
+    rules = [
+        {"path": "ticket.priority", "type": "regex", "pattern": r"Priority:\s*(\S+)\s*$"},
+        CLASSIFIER_RULE,
+    ]
+    code = compile_engine(rules, [], "You are a bot.", "test_clf")
+    ns = {}
+    exec(code, ns)
+    result = ns["process"]("Priority: High\nThe network printer keeps disconnecting")
+    assert result["assessment"]["root_cause"] == "network"
+
+
+def test_compiled_classifier_escalation():
+    """Below-threshold classifier should not set field, adds to escalated list."""
+    strict_rule = dict(CLASSIFIER_RULE, confidence_threshold=0.9999)
+    rules = [strict_rule]
+    code = compile_engine(rules, ["summary"], "You are a bot.", "test_clf")
+    ns = {}
+    exec(code, ns)
+    # Without LLM, escalated field won't be set
+    result = ns["process"]("network printer disconnect password access")
+    assert "root_cause" not in result.get("assessment", {})
+
+
+def test_compiled_classifier_has_math_import():
+    rules = [CLASSIFIER_RULE]
+    code = compile_engine(rules, [], "prompt", "test")
+    assert "import math" in code
+
+
+def test_compiled_classifier_docstring_tiers():
+    rules = SAMPLE_RULES + [CLASSIFIER_RULE]
+    code = compile_engine(rules, ["summary"], "prompt", "test")
+    assert "Tier 3 (classifier): 1 fields" in code
 
 
 def test_validate_command(tmp_path):
