@@ -71,13 +71,26 @@ def check_assessment(output: dict) -> dict:
     }
 
 
+class NothinkProvider:
+    """Wrapper that prepends /nothink to user prompts for Qwen3 models."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def complete(self, system: str, prompt: str, **kwargs):
+        return await self._inner.complete(system, "/nothink\n" + prompt, **kwargs)
+
+
 async def run_hybrid_with_model(model: str, system_prompt: str, input_text: str,
-                                 rules: list, llm_fields: list, base_url: str | None) -> dict:
+                                 rules: list, llm_fields: list, base_url: str | None,
+                                 nothink: bool = False) -> dict:
     """Run hybrid pipeline with a specific model."""
     from drift.hybrid.executor import run_hybrid
     from drift.providers.factory import make_provider
 
     provider = make_provider({"model": model, "base_url": base_url})
+    if nothink:
+        provider = NothinkProvider(provider)
 
     t0 = time.time()
     result = await run_hybrid(
@@ -92,7 +105,7 @@ async def run_hybrid_with_model(model: str, system_prompt: str, input_text: str,
     elapsed_ms = (time.time() - t0) * 1000
 
     return {
-        "model": model,
+        "model": model + (" /nothink" if nothink else ""),
         "output": result.merged,
         "llm_output": result.llm_output,
         "latency_ms": elapsed_ms,
@@ -101,89 +114,13 @@ async def run_hybrid_with_model(model: str, system_prompt: str, input_text: str,
     }
 
 
-async def main():
-    parser = argparse.ArgumentParser(description="Multi-model residual test")
-    parser.add_argument("--tickets", type=int, default=10)
-    parser.add_argument("--large-model", default=LARGE_MODEL)
-    parser.add_argument("--small-model", default=SMALL_MODEL)
-    args = parser.parse_args()
+def compare_results(label: str, large_results: list, small_results: list,
+                     tickets: list, large_model: str, small_label: str):
+    """Print comparison summary between large and small model results."""
+    print(f"\n{'=' * 70}")
+    print(f"  {label}")
+    print(f"{'=' * 70}")
 
-    from drift.tasks import resolve_task_prompts
-
-    # Load config and hybrid spec
-    cfg = yaml.safe_load(
-        (PROJECT_ROOT / "experiments" / "baseline-helpdesk.yaml").read_text()
-    )
-    cfg = resolve_task_prompts(cfg, PROJECT_ROOT / "tasks")
-    system_prompt = cfg["experiment"]["system_prompt"]
-    base_url = cfg["experiment"].get("base_url")
-
-    hybrid_spec = yaml.safe_load(
-        (PROJECT_ROOT / "tasks" / "helpdesk_triage" / "hybrid_auto.yaml").read_text()
-    )
-    rules = hybrid_spec["rules"]
-    llm_fields = hybrid_spec["llm_fields"]
-
-    tickets = load_tickets(args.tickets)
-
-    print("=" * 70)
-    print("MULTI-MODEL RESIDUAL TEST")
-    print("=" * 70)
-    print(f"  Large model:  {args.large_model}")
-    print(f"  Small model:  {args.small_model}")
-    print(f"  Tickets:      {len(tickets)}")
-    print(f"  Rules:        {len(rules)} (extract ticket metadata + severity)")
-    print(f"  LLM fields:   {', '.join(llm_fields)}")
-    print()
-
-    large_results = []
-    small_results = []
-
-    for i, ticket in enumerate(tickets):
-        input_text = format_ticket(ticket)
-        print(f"Ticket {i+1}/{len(tickets)}: {ticket['id']} "
-              f"({ticket['priority']}/{ticket['category']})")
-
-        # Run with large model
-        print(f"  {args.large_model}...", end="", flush=True)
-        lr = await run_hybrid_with_model(
-            args.large_model, system_prompt, input_text, rules, llm_fields, base_url)
-        la = check_assessment(lr["output"])
-        large_results.append({"ticket": ticket, "result": lr, "assessment": la})
-        print(f" {lr['llm_ms']:.0f}ms")
-
-        # Run with small model
-        print(f"  {args.small_model}...", end="", flush=True)
-        sr = await run_hybrid_with_model(
-            args.small_model, system_prompt, input_text, rules, llm_fields, base_url)
-        sa = check_assessment(sr["output"])
-        small_results.append({"ticket": ticket, "result": sr, "assessment": sa})
-        print(f" {sr['llm_ms']:.0f}ms")
-
-        # Quick comparison
-        matches = []
-        for field in LLM_FIELDS:
-            lv = la.get(field)
-            sv = sa.get(field)
-            if field == "next_steps":
-                match = la["has_next_steps"] and sa["has_next_steps"]
-            elif field == "summary":
-                match = la["has_summary"] and sa["has_summary"]
-            else:
-                match = lv == sv
-            matches.append(match)
-
-        match_str = " ".join("+" if m else "-" for m in matches)
-        print(f"  Match: [{match_str}] ({sum(matches)}/{len(matches)})")
-        print()
-
-    # ── Summary ──
-    print()
-    print("=" * 70)
-    print("RESULTS")
-    print("=" * 70)
-
-    # Latency
     large_ms = [r["result"]["llm_ms"] for r in large_results]
     small_ms = [r["result"]["llm_ms"] for r in small_results]
     large_mean = sum(large_ms) / len(large_ms)
@@ -191,22 +128,21 @@ async def main():
     speedup = (large_mean - small_mean) / large_mean * 100
 
     print(f"\n  LLM Latency (residual fields only):")
-    print(f"    {args.large_model:<20s}  {large_mean:>8,.0f} ms mean")
-    print(f"    {args.small_model:<20s}  {small_mean:>8,.0f} ms mean")
-    print(f"    Speedup:              {speedup:>7.0f}%")
+    print(f"    {large_model:<25s}  {large_mean:>8,.0f} ms mean")
+    print(f"    {small_label:<25s}  {small_mean:>8,.0f} ms mean")
+    print(f"    Speedup:                   {speedup:>7.0f}%")
 
-    # Field presence
-    print(f"\n  Field Presence:")
     presence_fields = ["has_severity", "has_root_cause", "has_assignment", "has_summary", "has_next_steps"]
-    print(f"    {'Field':<25s} {args.large_model:>15s} {args.small_model:>15s}")
-    print(f"    {'-'*25} {'-'*15} {'-'*15}")
+    print(f"\n  Field Presence:")
+    print(f"    {'Field':<25s} {large_model:>20s} {small_label:>20s}")
+    print(f"    {'-'*25} {'-'*20} {'-'*20}")
     for field in presence_fields:
         l_rate = sum(r["assessment"][field] for r in large_results) / len(large_results) * 100
         s_rate = sum(r["assessment"][field] for r in small_results) / len(small_results) * 100
-        print(f"    {field:<25s} {l_rate:>13.0f}%  {s_rate:>13.0f}%")
+        print(f"    {field:<25s} {l_rate:>18.0f}%  {s_rate:>18.0f}%")
 
-    # Field agreement (where both models produce values)
-    print(f"\n  Field Agreement (small model matches large):")
+    print(f"\n  Field Agreement (small matches large):")
+    agreement = {}
     for field in LLM_FIELDS:
         matches = 0
         total = 0
@@ -217,14 +153,13 @@ async def main():
                 continue
             total += 1
             if field in ("summary", "next_steps"):
-                # For free-text fields, just check presence
                 matches += 1
             else:
                 matches += (lv == sv)
         rate = matches / total * 100 if total else 0
+        agreement[field] = rate
         print(f"    {field:<25s} {matches:>3}/{total:<3} ({rate:.0f}%)")
 
-    # Per-ticket detail for disagreements
     disagreements = []
     for i, (lr, sr) in enumerate(zip(large_results, small_results)):
         for field in ["root_cause_category", "assignment_group", "severity"]:
@@ -246,34 +181,131 @@ async def main():
             print(f"    {d['ticket']} [{d['priority']}/{d['category']}] "
                   f"{d['field']}: {d['large']} vs {d['small']}")
 
-    # Save results
-    results_dir = PROJECT_ROOT / "results" / "residual_model_test"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    summary = {
-        "large_model": args.large_model,
-        "small_model": args.small_model,
-        "n_tickets": len(tickets),
+    return {
+        "small_model": small_label,
         "large_mean_ms": round(large_mean),
         "small_mean_ms": round(small_mean),
         "speedup_pct": round(speedup, 1),
+        "agreement": agreement,
         "disagreements": disagreements,
-        "per_ticket": [
-            {
-                "id": tickets[i]["id"],
-                "priority": tickets[i]["priority"],
-                "category": tickets[i]["category"],
-                "large_ms": round(large_ms[i]),
-                "small_ms": round(small_ms[i]),
-                "large_assessment": {k: v for k, v in large_results[i]["assessment"].items()
-                                     if not k.startswith("has_")},
-                "small_assessment": {k: v for k, v in small_results[i]["assessment"].items()
-                                     if not k.startswith("has_")},
-            }
-            for i in range(len(tickets))
-        ],
+    }
+
+
+async def main():
+    parser = argparse.ArgumentParser(description="Multi-model residual test")
+    parser.add_argument("--tickets", type=int, default=10)
+    parser.add_argument("--large-model", default=LARGE_MODEL)
+    parser.add_argument("--small-models", nargs="+", default=[SMALL_MODEL],
+                        help="Small models to test (e.g., qwen3:4b llama3.1:8b)")
+    parser.add_argument("--nothink", nargs="*", default=[],
+                        help="Models that should use /nothink (e.g., qwen3:4b)")
+    args = parser.parse_args()
+
+    nothink_set = set(args.nothink) if args.nothink else set()
+
+    from drift.tasks import resolve_task_prompts
+
+    cfg = yaml.safe_load(
+        (PROJECT_ROOT / "experiments" / "baseline-helpdesk.yaml").read_text()
+    )
+    cfg = resolve_task_prompts(cfg, PROJECT_ROOT / "tasks")
+    system_prompt = cfg["experiment"]["system_prompt"]
+    base_url = cfg["experiment"].get("base_url")
+
+    hybrid_spec = yaml.safe_load(
+        (PROJECT_ROOT / "tasks" / "helpdesk_triage" / "hybrid_auto.yaml").read_text()
+    )
+    rules = hybrid_spec["rules"]
+    llm_fields = hybrid_spec["llm_fields"]
+
+    tickets = load_tickets(args.tickets)
+
+    # Build list of (model, nothink, label) tuples
+    candidates = []
+    for model in args.small_models:
+        if model in nothink_set:
+            candidates.append((model, True, f"{model} /nothink"))
+        else:
+            candidates.append((model, False, model))
+
+    print("=" * 70)
+    print("MULTI-MODEL RESIDUAL TEST")
+    print("=" * 70)
+    print(f"  Reference:    {args.large_model}")
+    print(f"  Candidates:   {', '.join(c[2] for c in candidates)}")
+    print(f"  Tickets:      {len(tickets)}")
+    print(f"  Rules:        {len(rules)} (extract ticket metadata + severity)")
+    print(f"  LLM fields:   {', '.join(llm_fields)}")
+    print()
+
+    # Run reference model on all tickets first
+    print("─" * 70)
+    print(f"  Reference: {args.large_model}")
+    print("─" * 70)
+    large_results = []
+    for i, ticket in enumerate(tickets):
+        input_text = format_ticket(ticket)
+        print(f"  {i+1:>2}/{len(tickets)} {ticket['id']}...", end="", flush=True)
+        lr = await run_hybrid_with_model(
+            args.large_model, system_prompt, input_text, rules, llm_fields, base_url)
+        la = check_assessment(lr["output"])
+        large_results.append({"ticket": ticket, "result": lr, "assessment": la})
+        print(f" {lr['llm_ms']:.0f}ms")
+
+    # Run each candidate
+    all_candidate_results = {}
+    for model, use_nothink, label in candidates:
+        print()
+        print("─" * 70)
+        print(f"  Candidate: {label}")
+        print("─" * 70)
+        small_results = []
+        for i, ticket in enumerate(tickets):
+            input_text = format_ticket(ticket)
+            print(f"  {i+1:>2}/{len(tickets)} {ticket['id']}...", end="", flush=True)
+            sr = await run_hybrid_with_model(
+                model, system_prompt, input_text, rules, llm_fields, base_url,
+                nothink=use_nothink)
+            sa = check_assessment(sr["output"])
+            small_results.append({"ticket": ticket, "result": sr, "assessment": sa})
+            print(f" {sr['llm_ms']:.0f}ms")
+
+        all_candidate_results[label] = small_results
+
+    # Print comparison for each candidate
+    all_summaries = []
+    for model, use_nothink, label in candidates:
+        summary = compare_results(
+            f"{args.large_model} vs {label}",
+            large_results, all_candidate_results[label],
+            tickets, args.large_model, label,
+        )
+        all_summaries.append(summary)
+
+    # Final leaderboard
+    print(f"\n\n{'=' * 70}")
+    print(f"  LEADERBOARD")
+    print(f"{'=' * 70}")
+    print(f"\n  {'Model':<25s} {'Latency':>10s} {'Speedup':>10s} {'root_cause':>12s} {'assign_grp':>12s}")
+    print(f"  {'-'*25} {'-'*10} {'-'*10} {'-'*12} {'-'*12}")
+    print(f"  {args.large_model:<25s} {large_results[0]['result']['llm_ms']:>8.0f}ms {'(ref)':>10s} {'(ref)':>12s} {'(ref)':>12s}")
+    large_mean = sum(r["result"]["llm_ms"] for r in large_results) / len(large_results)
+    print(f"  {'':25s} {large_mean:>8.0f}ms")
+    for s in all_summaries:
+        rc = s["agreement"].get("root_cause_category", 0)
+        ag = s["agreement"].get("assignment_group", 0)
+        print(f"  {s['small_model']:<25s} {s['small_mean_ms']:>8}ms {s['speedup_pct']:>9.0f}% {rc:>10.0f}%  {ag:>10.0f}%")
+
+    # Save
+    results_dir = PROJECT_ROOT / "results" / "residual_model_test"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    out = {
+        "large_model": args.large_model,
+        "n_tickets": len(tickets),
+        "candidates": all_summaries,
     }
     out_path = results_dir / "residual_comparison.json"
-    out_path.write_text(json.dumps(summary, indent=2))
+    out_path.write_text(json.dumps(out, indent=2))
     print(f"\n  Results saved to {out_path}")
 
 
