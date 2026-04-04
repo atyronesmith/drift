@@ -816,3 +816,17 @@ Structured one-hot features consistently rank among the most discriminative:
 4. **The pipeline tier structure scales.** Tier 1 (regex) → Tier 2 (mapping) → Tier 3 (classifier) → Tier 4 (LLM). Each tier is < 1ms except LLM. Classifiers slot in naturally with the existing escalation mechanism (`matched=False` → LLM handles it).
 
 5. **Net effect**: ~15-30% LLM load reduction on classification fields with near-perfect accuracy. Combined with Tier 1+2 extraction (which already handles 7/12 fields deterministically), the LLM is left with only the genuinely hard reasoning work.
+
+### Integration: Classifier Discovery in Autogen Pipeline
+
+Following the POC, classifier training was integrated into the synthesis pipeline (`autogen.py`) and exposed via `drift distill`. End-to-end validation on 25 tickets revealed several issues that required fixes:
+
+**Anti-memorization guards.** Tier 2 mapping/conditional discovery was memorizing per-ticket values (e.g., mapping each unique `ticket.subject` to a `root_cause_category`). Fixed by rejecting source fields with >80% unique values — these are memorization, not generalizable patterns.
+
+**Cross-probe literal validation.** Tier 1 literal rules (e.g., `assignment_group = "Network Operations"`) were validated only against the first probe. When a literal varies across probes, it's now demoted to LLM-required. This prevents false Tier 1 captures that would block downstream discovery.
+
+**Failed-validation rule flow.** Regex rules that failed validation were counted as Tier 1, preventing them from reaching Tier 2/3 discovery. Fixed: unvalidated rules now flow to the LLM path for mapping, conditional, or classifier discovery.
+
+**Sample size threshold.** With 25 probes, classifiers achieved only 58% CV accuracy on `root_cause_category` (below the 0.60 threshold). The POC required 400 tickets for reliable training. The system correctly rejects low-accuracy classifiers and escalates to the LLM. Classifiers that are promoted produce correct predictions — the confidence gate ensures accuracy.
+
+**Verified pipeline:** `drift distill` probes N inputs → `synthesize_rules_multi` discovers Tier 1/2/3 rules → `render_hybrid_yaml` outputs a compilable spec → `drift compile` produces a working engine with inline classifier code.

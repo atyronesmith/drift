@@ -249,13 +249,15 @@ These findings have value independent of the optimization pipeline — they info
 
 Drift is a working CLI tool with:
 
-- 10 documented experiments across 5 task types
+- 12 documented experiments across 5 task types
 - Automated probe → synthesize → compile → refine pipeline
 - Standalone engine generation (single .py file, no runtime dependency)
 - Iterative refinement loop (`drift refine`) for automated engine improvement
-- 420+ passing tests
+- Classifier distillation (`drift distill`) for learning classification patterns from LLM labels
+- 450+ passing tests
 - Validated on 500-ticket dataset with 100% rule generalization
 - Multi-model residual testing showing the floor of compilation (reasoning fields need model capacity)
+- Four-tier extraction pipeline: regex → mapping → classifier → LLM
 
 ## Suggested Next Steps
 
@@ -277,6 +279,8 @@ Drift is a working CLI tool with:
 - **Multi-model residual test** — After compilation, can a smaller model handle the remaining reasoning fields? **Result: partially.** An 8B model (llama3.1:8b) is 72% faster on the residual fields but only achieves 50% agreement with the 32B model on classification tasks (root_cause_category, assignment_group), even with enum-constrained prompts. Free-text fields (summary, next_steps) agree at 100%. The hybrid framework's value is in eliminating deterministic work — the remaining reasoning fields genuinely need model capacity.
 - **Enum constraints** — Adding canonical value lists to classification prompts improved cross-model agreement from 10% to 50% with one line of prompt change. This is a cheap, high-ROI intervention for any classification task.
 - **Iterative refinement** — `drift refine` automates the validate → re-probe → re-synthesize → recompile loop, fixing underperforming rules without manual intervention.
+- **Classifier distillation** — Trained logistic regression on 400 LLM-labeled tickets. At 0.90 confidence threshold: 95% accuracy on 25-30% of tickets (bypassing LLM entirely), 100% at 0.95 confidence. Classifiers inline as pure arithmetic (dot product + softmax) in generated engines — no ML dependencies at runtime. The `drift distill` command automates the full pipeline.
+- **Attention-based keyword extraction** — Attempted using MLX attention weights to build keyword-based classification rules. Result: 64% accuracy — attention is too diffuse for classification. Classification genuinely requires holistic reasoning, not keyword matching. Dead end for this task type, but field-level attention mapping (severity←priority) remains valid.
 
 ## Summary
 
