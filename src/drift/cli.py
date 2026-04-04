@@ -1545,7 +1545,8 @@ def distill(config_path: str, input_dir: str, output: str, n_samples: int,
                 ],
             }
             probes.append((probe_data, input_text))
-            click.echo(f"OK ({result.total_ms:.0f}ms)")
+            n_tokens = len(result.tokens)
+            click.echo(f"OK ({n_tokens} tokens)")
         except Exception as e:
             click.echo(f"SKIP ({e})")
 
@@ -1558,7 +1559,11 @@ def distill(config_path: str, input_dir: str, output: str, n_samples: int,
 
     # Step 2: Synthesize rules (Tier 1 + 2 + 3 classifiers)
     click.echo(f"Step 2/3: Synthesizing rules...")
-    synth_result = synthesize_rules_multi(probes, entropy_threshold=0.3)
+    synth_result = synthesize_rules_multi(
+        probes, entropy_threshold=0.3,
+        min_accuracy=accuracy_threshold,
+        confidence_threshold=confidence_threshold,
+    )
     click.echo(format_synthesis_report(synth_result))
     click.echo()
 

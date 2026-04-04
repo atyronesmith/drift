@@ -733,6 +733,11 @@ def _find_best_mapping(
         if len(source_values) != n:
             continue
 
+        # Skip high-cardinality sources — unique values per probe is memorization
+        unique_sources = len(set(str(v) for v in source_values if v is not None))
+        if n >= 5 and unique_sources >= n * 0.8:
+            continue
+
         # Group target values by source value
         groups = {}
         for sv, tv in zip(source_values, target_values):
@@ -813,7 +818,16 @@ def _find_conditional(
     from itertools import combinations
 
     n = len(target_values)
-    source_paths = [p for p in tier1_paths if len(field_values.get(p, [])) == n]
+    source_paths = []
+    for p in tier1_paths:
+        vals = field_values.get(p, [])
+        if len(vals) != n:
+            continue
+        # Skip high-cardinality sources (memorization, not generalization)
+        unique_count = len(set(str(v) for v in vals if v is not None))
+        if n >= 5 and unique_count >= n * 0.8:
+            continue
+        source_paths.append(p)
 
     # Try pairs of source fields
     for s1, s2 in combinations(source_paths, 2):
@@ -1050,6 +1064,8 @@ def synthesize_rules_multi(
     probes: list[tuple[dict, str]],
     entropy_threshold: float = 0.3,
     attention_data: dict | None = None,
+    min_accuracy: float = 0.70,
+    confidence_threshold: float = 0.95,
 ) -> SynthesisResult:
     """Auto-generate hybrid rules from multiple probes.
 
@@ -1078,8 +1094,25 @@ def synthesize_rules_multi(
     # Step 1: Single-probe synthesis for Tier 1 rules (use first probe)
     base_result = synthesize_rules(probes[0][0], probes[0][1], entropy_threshold)
 
-    tier1_paths = {r.path for r in base_result.rules if r.rule_type not in ("llm_required",)}
-    llm_paths = {r.path for r in base_result.rules if r.rule_type == "llm_required"}
+    # Cross-validate literal rules against all probes — literals that vary are demoted
+    if len(probes) > 1:
+        parsed_all = [_parse_llm_output(pd) for pd, _ in probes]
+        for rule in base_result.rules:
+            if rule.rule_type == "literal" and rule.validated:
+                values = set()
+                for p in parsed_all:
+                    if p is not None:
+                        v = _get_nested(p, rule.path)
+                        if v is not None:
+                            values.add(str(v))
+                if len(values) > 1:
+                    rule.rule_type = "llm_required"
+                    rule.validated = False
+
+    tier1_paths = {r.path for r in base_result.rules
+                   if r.rule_type not in ("llm_required",) and r.validated}
+    llm_paths = {r.path for r in base_result.rules
+                 if r.rule_type == "llm_required" or not r.validated}
 
     if len(probes) < 3 or not llm_paths:
         # Not enough probes for Tier 2 discovery, return single-probe result
@@ -1116,6 +1149,8 @@ def synthesize_rules_multi(
 
     tier3_rules = _discover_classifier_rules(
         probes, tier1_paths, remaining_llm_paths, all_field_values,
+        confidence_threshold=confidence_threshold,
+        min_accuracy=min_accuracy,
     )
 
     # Step 4: Merge results — replace llm_required rules with Tier 2/3 where found
