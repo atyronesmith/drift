@@ -192,6 +192,7 @@ $ drift run experiments/auto-hybrid-incident-triage.yaml --runs 10
 | `literal` | Fixed value, always emitted | Near-zero entropy but value NOT in input (model always says this) |
 | `mapping` | Lookup table from another extracted field | Multi-ticket probing reveals a field is conditionally deterministic |
 | `conditional` | Ordered conditions on extracted fields, first match wins | Multi-ticket probing reveals a field depends on multiple inputs |
+| `classifier` | Logistic regression with confidence-gated escalation | Multi-probe distillation finds a classification field with learnable patterns |
 
 #### Mapping and Conditional Rules
 
@@ -227,6 +228,28 @@ These rule types reference fields extracted by earlier rules, so **rule order ma
 ```
 
 These rule types close the gap between single-ticket entropy analysis and multi-ticket behavior. A field may show high entropy on one ticket (the model "deliberates") but produce deterministic results across tickets given the same input features. Multi-ticket probing discovers these patterns, which then become mapping or conditional rules.
+
+#### Classifier Rules
+
+For classification fields where the LLM chooses from a small set of values (e.g., `root_cause_category`, `assignment_group`), the system can train a logistic regression classifier on LLM-labeled data and inline it as pure arithmetic:
+
+```yaml
+  - path: assessment.root_cause_category
+    type: classifier
+    classifier_type: logistic_regression
+    vocabulary: ["access", "account", "network", "printer", ...]
+    weights: [[0.12, -0.34, ...], ...]   # n_classes × n_features
+    bias: [0.1, -0.2, ...]
+    classes: ["access_control", "configuration", "network", ...]
+    structured_features:
+      - source: ticket.stated_category
+        categories: [Account, Network, Software, ...]
+    confidence_threshold: 0.95
+```
+
+At runtime, the classifier builds a feature vector (bag-of-words + structured one-hot), computes `argmax(W @ x + b)` via softmax, and returns the prediction if confidence exceeds the threshold. Low-confidence predictions return `matched=False`, escalating to the LLM via the existing fallback mechanism. No sklearn/numpy at runtime — pure stdlib Python.
+
+This creates a four-tier pipeline: Tier 1 (regex/literal) → Tier 2 (mapping/conditional) → Tier 3 (classifier) → Tier 4 (LLM). Each tier is < 1ms except LLM.
 
 ### Output Modes
 
@@ -458,6 +481,21 @@ drift run experiments/auto-hybrid-incident-triage.yaml --runs 10
 drift compare results/baseline/... results/auto-hybrid/...
 ```
 
+### Classifier distillation
+
+For classification fields that can't be captured by mapping or conditional rules, `drift distill` probes multiple inputs, trains logistic regression classifiers, and produces a hybrid YAML with all tiers:
+
+```bash
+drift distill experiments/baseline-helpdesk.yaml \
+    --input-dir datasets/ticket_inputs/ \
+    --n-samples 200 \
+    --accuracy-threshold 0.70 \
+    --confidence-threshold 0.95 \
+    -o hybrid_with_classifiers.yaml
+```
+
+This requires `scikit-learn` (optional dependency: `pip install drift[classifiers]`). The trained classifiers are exported as weight matrices — the compiled engine needs only stdlib Python.
+
 ### Tuning the entropy threshold
 
 ```bash
@@ -561,7 +599,7 @@ Adding `(one of: Access Management, Account Management, ...)` to the assignment_
 | File | Purpose |
 |------|---------|
 | `src/drift/hybrid/autogen.py` | Auto-generates rules from probe data + input text |
-| `src/drift/hybrid/rules.py` | Rule execution: regex, regex_all, literal, mapping, conditional |
+| `src/drift/hybrid/rules.py` | Rule execution: regex, regex_all, literal, mapping, conditional, classifier |
 | `src/drift/hybrid/executor.py` | Orchestration: rules -> prompt -> LLM -> merge |
 | `src/drift/hybrid/compiler.py` | Compile hybrid spec to standalone Python engine |
 | `src/drift/probing/logprobs.py` | Token entropy measurement via Ollama logprobs (top-k) |
