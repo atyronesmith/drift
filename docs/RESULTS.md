@@ -927,9 +927,22 @@ Error type agreement (where raw succeeded): **85% normalized match** (23/27 pair
 
 **Raw LLM failure mode**: On logs >50KB, the raw model frequently ignores the "single-line summary" instruction and instead produces multi-paragraph narratives starting with "Based on the provided log, here is a summary..." Pre-digestion eliminates this failure mode entirely.
 
+### Cost Projection (10,000 logs/month)
+
+Pre-digestion reduces avg input from ~23,229 to ~3,923 tokens/log. Full pipeline savings (including classify/route/solution overhead): **75.4%**.
+
+| Model | Monthly Raw | Monthly Saved | Annual Saved |
+|-------|------------|--------------|-------------|
+| GPT-4o | $661 | $483 | **$5,792** |
+| Claude Sonnet | $817 | $579 | **$6,950** |
+| Claude Haiku | $68 | $48 | $579 |
+| GPT-4o-mini | $40 | $29 | $348 |
+
+Savings scale linearly with volume. At 100K logs/month on Claude Sonnet: **$69,503/year saved**.
+
 ### Key Takeaway
 
-**83% input token reduction** across 500 production logs. The savings are consistent (P10=80.6%, P90=93.3%) and independent of log size. Pre-digestion **never degrades quality** — it improves it in 53% of cases and eliminates the 40% raw failure rate on large logs. At API pricing, this directly translates to 83% cost reduction on the summarization step — the most expensive step in the pipeline.
+**83% input token reduction** across 500 production logs. The savings are consistent (P10=80.6%, P90=93.3%) and independent of log size. Pre-digestion **never degrades quality** — it improves it in 53% of cases and eliminates the 40% raw failure rate on large logs. At 10K logs/month on GPT-4o, pre-digestion saves **$5,792/year**.
 
 ## Experiment 14: Output-Side Optimization on Ansible Classification
 
