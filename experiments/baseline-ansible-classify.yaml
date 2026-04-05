@@ -1,0 +1,8 @@
+experiment:
+  name: baseline-ansible-classify
+  model: qwen2.5:32b
+  temperature: 0
+  task: ansible_classify
+
+  system_prompt_file: system.md
+  user_prompt_file: user.md

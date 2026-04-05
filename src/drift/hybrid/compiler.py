@@ -28,6 +28,7 @@ def compile_engine(
     Returns:
         Complete Python source code as a string
     """
+    llm_fields = llm_fields or []
     # Separate rules by type
     regex_rules = [r for r in rules if r["type"] == "regex"]
     regex_all_rules = [r for r in rules if r["type"] == "regex_all"]
