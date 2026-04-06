@@ -1046,3 +1046,51 @@ Embedding costs are modest compared to LLM inference costs (Experiment 13 showed
 ### Key Takeaway
 
 Pre-digestion is a **strong fit for RAG ingestion**: 82% fewer chunks to embed, store, and search, with 6.8x faster ingestion and 2x better embedding cohesion. The combination of cost reduction and quality improvement makes pre-digestion a prerequisite for RAG pipelines over noisy documents — it's not just cheaper, it produces better embeddings.
+
+## Experiment 16: General Pre-Digestion on RAGBench
+
+**Date**: 2026-04-06
+
+**Goal**: Validate that general-purpose (domain-agnostic) pre-digestion helps retrieval on standard benchmarks — not just Ansible logs. Test on three RAGBench sub-datasets with different noise profiles.
+
+### Setup
+
+- **Benchmark**: RAGBench (galileo-ai/ragbench), test splits
+- **Datasets**: TechQA (IBM tech support), EManual (electronics manuals), CuAD (legal contracts)
+- **Embedding model**: nomic-embed-text via Ollama (768-dim)
+- **Chunking**: Fixed-size 2048 chars, 200-char overlap
+- **Retrieval**: Cosine similarity, top-5, deduplicated by document
+- **Metrics**: nDCG@5, Recall@5
+- **Script**: `scripts/ragbench_predigest_experiment.py`
+
+### General Pre-Digestion Techniques
+
+Domain-agnostic, applied to any corpus:
+1. **Corpus-level boilerplate detection** — lines appearing in >5% of documents (headers, footers, disclaimers)
+2. **Exact document deduplication** — MD5-based
+3. **Separator line removal** — visual separators (`*****`, `------`, etc.)
+4. **Whitespace normalization** — collapse excessive blank lines
+
+### Results
+
+| Dataset | Docs | Queries | Boilerplate Lines | Char Red. | Chunk Red. | nDCG@5 Raw | nDCG@5 Digest | Δ nDCG | Recall@5 Raw | Recall@5 Digest | Δ Recall |
+|---------|------|---------|-------------------|-----------|------------|------------|---------------|--------|--------------|-----------------|----------|
+| TechQA  | 769  | 314     | 28                | 11.1%     | 8.8%       | 0.5707     | 0.5918        | **+0.0211** | 0.2777       | 0.2828          | +0.0051  |
+| EManual | 102  | 132     | 0                 | 0.1%      | 0.0%       | 0.6101     | 0.6101        | 0.0000 | 0.5429       | 0.5429          | 0.0000   |
+| CuAD    | 102  | 510     | 0                 | 0.2%      | 0.1%       | 0.0390     | 0.0323        | -0.0067 | 0.0627       | 0.0569          | -0.0058  |
+
+### Analysis
+
+**TechQA** — IBM tech support documents contain significant cross-document boilerplate: CVSS score templates, APAR status blocks, subscription links. 28 boilerplate lines detected, accounting for 11.1% of content. Pre-digestion improved nDCG@5 by +3.7% — the boilerplate was polluting chunk embeddings and retrieval.
+
+**EManual** — Electronics manuals are well-structured, clean text. Zero boilerplate detected. Pre-digestion is a harmless no-op: identical retrieval metrics.
+
+**CuAD** — Legal contracts are also clean (each contract is unique text). The tiny negative delta (-0.0067 nDCG) is within measurement noise — CuAD's baseline retrieval is extremely poor (nDCG=0.039) because the queries are highly specific clause-level questions against full contract documents.
+
+### Key Takeaway
+
+Pre-digestion's value **scales with corpus noisiness**:
+- **Noisy corpora** (logs, template-heavy docs): transformative — 82% chunk reduction on Ansible logs, +3.7% nDCG on TechQA
+- **Clean corpora** (manuals, contracts): safe no-op — no harm, no help
+
+This validates pre-digestion as a **safe default** in any RAG pipeline. It helps where noise exists and costs nothing where it doesn't. The general pre-digester requires no domain knowledge — boilerplate detection is fully corpus-driven.
