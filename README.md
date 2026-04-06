@@ -4,6 +4,25 @@ LLMs are non-deterministic — even at temperature=0, the same prompt can produc
 
 Drift quantifies this. It runs identical multi-agent pipelines repeatedly, captures every intermediate output at each step, and measures how output variability grows with pipeline depth and breadth.
 
+## What to target
+
+Drift works best on AI applications with **repeating, structured workloads** — not one-off chat. Look for:
+
+**Strong candidates:**
+- **Structured extraction pipelines** — LLM reads input (logs, tickets, invoices, reports) and outputs structured JSON with defined fields. Fields that copy from the input (IDs, names, dates) can be extracted with rules; classification fields can be distilled into classifiers.
+- **Multi-step LLM pipelines** — Summarize → Classify → Route → Act chains where intermediate steps have constrained outputs (categories, binary decisions). Each deterministic step you eliminate removes an LLM round-trip.
+- **Large-input summarization** — Logs, traces, documents where 70-90% of the input is noise. Pre-digestion (deterministic preprocessing) can cut input tokens by 80%+ while improving output quality.
+- **Batch processing** — The same prompt template applied to hundreds or thousands of inputs. Small per-unit savings compound to significant cost reduction at scale.
+- **Classification with known categories** — Routing, triage, labeling tasks where the output is one of N known values. Classifier distillation can replace the LLM call entirely for high-confidence predictions.
+
+**Weak candidates:**
+- **Open-ended chat / Q&A** — Free-form conversational responses with no structured output. Nothing to extract deterministically.
+- **RAG chatbots** — Quality depends on retrieval, not generation determinism. Single LLM call, variable inputs, unstructured output.
+- **Creative generation** — Content writing, code generation, brainstorming. The output IS the creative work — there's nothing to shortcut.
+- **Demo/quickstart repos** — Educational notebooks with one-off examples, no repeating workload.
+
+**The test:** If you can describe the LLM's output as "fill in these fields," drift can help. If the output is "write me a paragraph," it probably can't.
+
 ## How it works
 
 Three independent phases connected by JSON files on disk:
