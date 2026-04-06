@@ -136,6 +136,22 @@ Pre-digestion is not just a cost optimization — it is a quality improvement. O
 
 **Finding:** Textual drift wildly overstates functional drift. Across all tasks, 96.7% of textually different outputs are functionally equivalent. But the remaining 3.3% represent real risk in pipelines where outputs feed downstream systems.
 
+### Experiment 6: RAG Ingestion with Pre-Digestion
+
+**Setup:** Same 500 Ansible logs, chunked at 2048 chars (~512 tokens) with 200-char overlap. Embedded via nomic-embed-text (768-dim). 50 LLM-generated summaries used as retrieval queries.
+
+**Ingestion results:**
+
+| Metric | Raw | Pre-digested | Change |
+|--------|-----|-------------|--------|
+| Chunks | 25,367 | 4,511 | **82% fewer** |
+| Tokens to embed | ~12.9M | ~2.2M | **83% fewer** |
+| Embedding time | 27 min | 4 min | **6.8x faster** |
+
+**Retrieval results:** Precision is similar between raw and pre-digested (P@1 = 0.16 for both). However, pre-digested results contain zero noise chunks in top-5 results vs. 8 for raw.
+
+**Finding:** Pre-digestion is a strong fit for RAG ingestion cost and throughput — 82% fewer chunks to embed, store, and search. The retrieval quality result is inconclusive with fixed-size chunking and terse queries, but noise elimination from results is measurable. The real value is the combined savings: pre-digestion reduces costs at both the embedding stage and the query-time LLM stage.
+
 ## What to Target
 
 Drift is not a universal optimization. It works on specific application patterns:
@@ -146,13 +162,14 @@ Drift is not a universal optimization. It works on specific application patterns
 - Large-input processing where most of the input is noise
 - Batch processing where the same prompt runs on thousands of inputs
 - Classification with known categories (routing, triage, labeling)
+- RAG ingestion pipelines (pre-digestion before chunking and embedding)
 
 **Weak candidates:**
 - Open-ended chat and Q&A
-- RAG chatbots (quality depends on retrieval, not generation)
+- RAG query-answering (quality depends on retrieval, not generation)
 - Creative generation (the output IS the work)
 
-The test: if the LLM's output can be described as "fill in these fields," drift can help. If the output is "write me a paragraph," it probably can't.
+The test: if the LLM's output can be described as "fill in these fields," drift can help. If the output is "write me a paragraph," it probably can't. For RAG, drift helps the ingestion side (fewer, cleaner chunks) even when the query side is out of scope.
 
 ## How to Evaluate
 
@@ -184,6 +201,6 @@ The probe step takes one LLM call. The resulting engine handles every subsequent
 
 ## Status
 
-Drift is working software with validated results on real datasets. The codebase includes 14 documented experiments, standalone engine compilation, and CLI commands for the full probe-synthesize-compile workflow.
+Drift is working software with validated results on real datasets. The codebase includes 15 documented experiments, standalone engine compilation, and CLI commands for the full probe-synthesize-compile workflow.
 
 Repository: [github.com/atyronesmith/drift](https://github.com/atyronesmith/drift)

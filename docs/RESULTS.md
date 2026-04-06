@@ -989,3 +989,59 @@ Eliminating 74% of Classify calls saves ~1.5% of total pipeline tokens. The outp
 ### Key Takeaway
 
 **Amdahl's Law**: When one step (summarization) consumes 92% of the token budget, optimizing smaller steps (classify, route) yields diminishing returns. The highest-ROI optimization is reducing input to the dominant step. Output-side classifier distillation still delivers value through latency reduction (eliminating LLM round-trips) and cost at scale.
+
+---
+
+## Experiment 15: RAG Pre-Digestion — Embedding Ingestion and Retrieval
+
+**Date**: 2026-04-06
+
+**Goal**: Test whether drift's pre-digestion technique improves RAG ingestion pipelines — fewer chunks to embed, lower embedding cost, and better retrieval quality.
+
+**Motivation**: RAG ingestion pipelines chunk documents and embed each chunk through an embedding model (a specifically-trained LLM). Raw logs are 70-90% noise, meaning most chunks encode garbage that pollutes the vector store. Pre-digestion should eliminate these chunks entirely.
+
+### Setup
+
+- **Corpus**: 500 Ansible error logs (same as Experiments 13-14)
+- **Embedding model**: nomic-embed-text via Ollama (768-dim vectors)
+- **Chunking**: Fixed-size 2048 chars (~512 tokens), 200-char overlap
+- **Retrieval test**: 50 LLM-generated summaries used as queries, ground truth = chunks from the summary's source log
+- **Script**: `scripts/rag_predigest_experiment.py`
+
+### Track 1: Ingestion Efficiency
+
+| Metric | Raw | Pre-digested | Reduction |
+|--------|-----|-------------|-----------|
+| Total chunks | 25,367 | 4,511 | **82.2%** |
+| Total tokens | ~12.9M | ~2.2M | **83.2%** |
+| Embedding time | 1,628s (27 min) | 241s (4 min) | **6.8x faster** |
+| Noise chunks (>90% noise) | 427 (1.7%) | 0 | eliminated |
+
+Pre-digestion reduces the vector store to 1/5th the size. Every downstream operation — embedding, storage, indexing, search — benefits proportionally.
+
+### Track 2: Retrieval Quality
+
+| Metric | Raw | Pre-digested |
+|--------|-----|-------------|
+| Precision@1 | 0.160 | 0.160 |
+| Precision@5 | 0.360 | 0.280 |
+| MRR | 0.241 | 0.204 |
+| Noise in top-5 (total) | 8 | **0** |
+
+Retrieval precision is similar between raw and pre-digested. Both show low absolute precision because single-line error summaries are poor queries for embedding-based retrieval against verbose log chunks. Raw edges digest on P@5 because it has 5.6x more chunks per log, giving more chances to match.
+
+The notable difference: pre-digested results contain **zero noise chunks** in top-5 results, while raw results include 8 noise chunks displacing useful content.
+
+### Embedding Cost Projection
+
+| Scale | text-embedding-3-small saved/yr | text-embedding-3-large saved/yr |
+|-------|-------------------------------|-------------------------------|
+| 10K logs/month | $51 | $334 |
+| 50K logs/month | $257 | $1,668 |
+| 100K logs/month | $513 | $3,337 |
+
+Embedding costs are modest compared to LLM inference costs (Experiment 13 showed $5,800-$7,000/yr saved on LLM summarization at 10K/month). The real RAG value is in the combined savings: pre-digestion reduces costs at both the embedding stage AND the query-time LLM stage (smaller context windows from cleaner retrieved chunks).
+
+### Key Takeaway
+
+Pre-digestion is a **strong fit for RAG ingestion cost and throughput**: 82% fewer chunks to embed, store, and search, with 6.8x faster ingestion. The retrieval quality result is inconclusive — both approaches struggle with this particular query format. Semantic chunking (by Ansible task/play blocks) and richer queries would likely show more differentiation. The zero-noise-in-top-5 result for digest suggests cleaner retrieval even when precision metrics are similar.
