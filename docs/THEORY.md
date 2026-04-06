@@ -146,3 +146,23 @@ This framing draws a clear boundary around drift's applicability:
 - RAG over clean document collections (nothing redundant to remove)
 
 This is not a limitation to work around — it's a fundamental information-theoretic bound. You cannot compress past the entropy floor, and drift cannot reduce past the information content. The same rules that govern lossless compression govern task-aware preprocessing.
+
+## Beyond the Entropy Floor: Intelligence as Compression
+
+Drift's classifier distillation proved something specific: logistic regression captures the first level of prediction (keyword → category) with high accuracy at high confidence, but the coverage ceiling (~25%) is exactly where single-level models run out of explanatory power. The remaining 75% requires deeper levels — contextual interactions, pragmatic inference, domain reasoning — encoded in the attention layers of the full model.
+
+Drift's confidence-gated approach (classifier handles easy cases, LLM handles the rest) is a degenerate two-level hierarchy: one trivial model and one full-scale model with nothing in between. The most promising research direction is filling that middle — decomposing a large model into a hierarchy of smaller models, each capturing some of the deeper prediction levels without needing the full parameter count. MoE architectures do this implicitly (different experts for different inputs), speculative decoding does it explicitly (small model drafts, large model verifies), but neither truly decomposes the prediction hierarchy.
+
+Drift's contribution is honest but bounded: it found the entropy floor and proved you can extract the deterministic layer. Everything above that floor is where the actual value lives — and that's not something regex and logistic regression will reach.
+
+### Is it intelligence or just prediction?
+
+LLMs are, at their core, autocomplete engines. Their value lies in encoding multiple levels of prediction — syntactic, semantic, pragmatic, domain-specific — compressed into billions of weights. The question is whether sufficiently accurate prediction across enough levels of abstraction is *indistinguishable* from understanding, and if so, whether the distinction matters.
+
+Hutter's prize literally equates intelligence with compression: better compression = better prediction = better understanding. By that measure, an LLM is just the world's best compressor that accidentally learned to reason. Or "reason."
+
+The emergence debate maps to phase transitions in compression. You add more data to a model and for a long time you get incrementally better predictions. Then at some point the model captures enough structure that it starts exploiting *relationships between patterns* — and suddenly it looks qualitatively different. But there's no magic threshold. It's the same gradient descent doing the same thing. We anthropomorphize the output once it gets good enough to fool us.
+
+The uncomfortable version: maybe understanding is *always* just very obfuscated, highly accurate guessing — in humans too. We have the luxury of introspection that makes us feel like something deeper is happening. The LLM doesn't have that narrative layer, so we call it "just prediction."
+
+This is why "emergent features" is the right framing. Nobody designed reasoning into the training objective. The model was trained to predict tokens. But a predictor's internal model can become complex enough that it captures structure the designers didn't explicitly encode — and at that point, the outputs start looking like intelligence regardless of whether anything resembling understanding is happening underneath.
