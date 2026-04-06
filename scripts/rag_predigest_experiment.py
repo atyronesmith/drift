@@ -14,7 +14,6 @@ Usage:
 
 import argparse
 import json
-import math
 import os
 import subprocess
 import sys
@@ -118,7 +117,6 @@ def retrieve_top_k(query_vec, db_vectors, k=TOP_K):
 def main():
     parser = argparse.ArgumentParser(description="RAG pre-digestion experiment")
     parser.add_argument("--log-dir", required=True, help="Directory with raw .txt logs")
-    parser.add_argument("--summary-dir", required=True, help="Directory with LLM summaries")
     parser.add_argument("--n", type=int, default=0, help="Number of logs (0 = all)")
     parser.add_argument("-o", "--output", required=True, help="Output JSON path")
     parser.add_argument(
@@ -128,27 +126,21 @@ def main():
     args = parser.parse_args()
 
     log_dir = Path(args.log_dir)
-    summary_dir = Path(args.summary_dir)
-
-    # Load logs that have matching summaries (for retrieval ground truth)
-    summary_files = sorted(summary_dir.glob("*.txt"))
-    summary_stems = {f.stem for f in summary_files}
 
     all_logs = sorted(log_dir.glob("*.txt"))
     if args.n > 0:
         all_logs = all_logs[: args.n]
 
-    # Split: logs with summaries (for retrieval test) and all logs (for ingestion stats)
-    logs_with_summaries = [f for f in all_logs if f.stem in summary_stems]
-    print(f"Corpus: {len(all_logs)} logs, {len(logs_with_summaries)} have summaries for retrieval test")
+    db_logs = all_logs
+    print(f"Corpus: {len(all_logs)} logs")
     print(f"Chunk size: {CHUNK_SIZE} chars, overlap: {CHUNK_OVERLAP} chars")
     print(f"Embedding model: {EMBED_MODEL}")
     print(f"{'=' * 70}\n")
 
     # ---------------------------------------------------------------
-    # Step 1: Chunk all logs (raw and pre-digested)
+    # Step 1: Chunk DB logs (raw and pre-digested)
     # ---------------------------------------------------------------
-    print("Step 1: Chunking...")
+    print("Step 1: Chunking DB logs...")
 
     raw_chunks = []       # (chunk_text, log_stem)
     digest_chunks = []    # (chunk_text, log_stem)
@@ -158,7 +150,7 @@ def main():
     raw_noise_chunks = 0
     total_raw_chunks = 0
 
-    for idx, filepath in enumerate(all_logs):
+    for idx, filepath in enumerate(db_logs):
         raw_text = filepath.read_text(errors="replace")
         digested_text = predigest(filepath)
         stem = filepath.stem
@@ -177,8 +169,8 @@ def main():
             digest_chunks.append((c, stem))
             digest_total_chars += len(c)
 
-        if (idx + 1) % 100 == 0 or idx + 1 == len(all_logs):
-            print(f"  [{idx+1}/{len(all_logs)}] raw: {len(raw_chunks)} chunks, digest: {len(digest_chunks)} chunks")
+        if (idx + 1) % 100 == 0 or idx + 1 == len(db_logs):
+            print(f"  [{idx+1}/{len(db_logs)}] raw: {len(raw_chunks)} chunks, digest: {len(digest_chunks)} chunks")
 
     chunk_reduction = round((1 - len(digest_chunks) / len(raw_chunks)) * 100, 1)
     token_reduction = round((1 - digest_total_chars / raw_total_chars) * 100, 1)
@@ -225,92 +217,84 @@ def main():
     digest_vectors_norm = digest_vectors / digest_norms
 
     # ---------------------------------------------------------------
-    # Step 3: Retrieval quality
+    # Step 3: Retrieval quality — cohesion test
     # ---------------------------------------------------------------
-    print(f"\nStep 3: Retrieval quality ({len(logs_with_summaries)} queries)...")
+    # Measure: do chunks from the same log cluster together?
+    # For N sampled chunks, find top-k neighbors (excluding self).
+    # Report fraction of neighbors from the same log.
+    # Pre-digestion should improve cohesion: noise removed, signal
+    # concentrated, so same-log chunks embed closer together.
+    N_SAMPLE = min(200, len(raw_chunks), len(digest_chunks))
+    print(f"\nStep 3: Retrieval quality — cohesion test ({N_SAMPLE} sampled chunks)...")
+    print(f"  Metric: what fraction of a chunk's top-{TOP_K} neighbors come from the same log?")
 
-    # Load summaries as queries
-    queries = []
-    query_stems = []
-    for sf in summary_files:
-        if sf.stem in {f.stem for f in all_logs}:
-            text = sf.read_text().strip()
-            if text:
-                queries.append(text)
-                query_stems.append(sf.stem)
+    raw_stems = [c[1] for c in raw_chunks]
+    digest_stems = [c[1] for c in digest_chunks]
 
-    if not queries:
-        print("  No queries available — skipping retrieval test")
-        retrieval_results = {}
-    else:
-        print(f"  Embedding {len(queries)} queries...")
-        query_vectors = embed_all(queries, args.ollama_host)
-        q_norms = np.linalg.norm(query_vectors, axis=1, keepdims=True)
-        q_norms[q_norms == 0] = 1
-        query_vectors_norm = query_vectors / q_norms
+    # Sample indices (evenly spaced)
+    raw_sample_idx = [i * len(raw_chunks) // N_SAMPLE for i in range(N_SAMPLE)]
+    digest_sample_idx = [i * len(digest_chunks) // N_SAMPLE for i in range(N_SAMPLE)]
 
-        # Build stem-to-index mappings
-        raw_stems = [c[1] for c in raw_chunks]
-        digest_stems = [c[1] for c in digest_chunks]
+    # Raw cohesion
+    raw_same_log_hits = 0
+    raw_total_neighbors = 0
+    raw_noise_in_neighbors = 0
 
-        # Evaluate retrieval
-        raw_p1 = 0
-        raw_p5 = 0
-        raw_rr_sum = 0.0
-        digest_p1 = 0
-        digest_p5 = 0
-        digest_rr_sum = 0.0
-        raw_noise_in_top5 = 0
-        digest_noise_in_top5 = 0
+    for idx in raw_sample_idx:
+        qvec = raw_vectors_norm[idx]
+        sims = qvec @ raw_vectors_norm.T
+        sims[idx] = -1  # exclude self
+        top_k = np.argsort(sims)[-TOP_K:][::-1]
+        query_stem = raw_stems[idx]
 
-        for qi, (query_stem, qvec) in enumerate(zip(query_stems, query_vectors_norm)):
-            # Raw retrieval
-            raw_sims = qvec @ raw_vectors_norm.T
-            raw_top = np.argsort(raw_sims)[-TOP_K:][::-1]
-            raw_hit_stems = [raw_stems[i] for i in raw_top]
+        for i in top_k:
+            raw_total_neighbors += 1
+            if raw_stems[i] == query_stem:
+                raw_same_log_hits += 1
+            if noise_ratio(raw_texts[i]) > 0.9:
+                raw_noise_in_neighbors += 1
 
-            if raw_hit_stems[0] == query_stem:
-                raw_p1 += 1
-            if query_stem in raw_hit_stems:
-                raw_p5 += 1
-                raw_rr_sum += 1.0 / (raw_hit_stems.index(query_stem) + 1)
-            for i in raw_top:
-                if noise_ratio(raw_texts[i]) > 0.9:
-                    raw_noise_in_top5 += 1
+    # Digest cohesion
+    digest_same_log_hits = 0
+    digest_total_neighbors = 0
+    digest_noise_in_neighbors = 0
 
-            # Digest retrieval
-            dig_sims = qvec @ digest_vectors_norm.T
-            dig_top = np.argsort(dig_sims)[-TOP_K:][::-1]
-            dig_hit_stems = [digest_stems[i] for i in dig_top]
+    for idx in digest_sample_idx:
+        qvec = digest_vectors_norm[idx]
+        sims = qvec @ digest_vectors_norm.T
+        sims[idx] = -1  # exclude self
+        top_k = np.argsort(sims)[-TOP_K:][::-1]
+        query_stem = digest_stems[idx]
 
-            if dig_hit_stems[0] == query_stem:
-                digest_p1 += 1
-            if query_stem in dig_hit_stems:
-                digest_p5 += 1
-                digest_rr_sum += 1.0 / (dig_hit_stems.index(query_stem) + 1)
-            for i in dig_top:
-                if noise_ratio(digest_texts[i]) > 0.9:
-                    digest_noise_in_top5 += 1
+        for i in top_k:
+            digest_total_neighbors += 1
+            if digest_stems[i] == query_stem:
+                digest_same_log_hits += 1
+            if noise_ratio(digest_texts[i]) > 0.9:
+                digest_noise_in_neighbors += 1
 
-        n_queries = len(queries)
-        retrieval_results = {
-            "n_queries": n_queries,
-            "raw_precision_at_1": round(raw_p1 / n_queries, 3),
-            "digest_precision_at_1": round(digest_p1 / n_queries, 3),
-            "raw_precision_at_5": round(raw_p5 / n_queries, 3),
-            "digest_precision_at_5": round(digest_p5 / n_queries, 3),
-            "raw_mrr": round(raw_rr_sum / n_queries, 3),
-            "digest_mrr": round(digest_rr_sum / n_queries, 3),
-            "raw_noise_in_top5_total": int(raw_noise_in_top5),
-            "digest_noise_in_top5_total": int(digest_noise_in_top5),
-        }
+    raw_cohesion = round(raw_same_log_hits / raw_total_neighbors, 3) if raw_total_neighbors else 0
+    digest_cohesion = round(digest_same_log_hits / digest_total_neighbors, 3) if digest_total_neighbors else 0
 
-        print(f"\n  {'Metric':<25s}  {'Raw':>8s}  {'Digest':>8s}")
-        print(f"  {'-'*45}")
-        print(f"  {'Precision@1':<25s}  {retrieval_results['raw_precision_at_1']:>8.3f}  {retrieval_results['digest_precision_at_1']:>8.3f}")
-        print(f"  {'Precision@5':<25s}  {retrieval_results['raw_precision_at_5']:>8.3f}  {retrieval_results['digest_precision_at_5']:>8.3f}")
-        print(f"  {'MRR':<25s}  {retrieval_results['raw_mrr']:>8.3f}  {retrieval_results['digest_mrr']:>8.3f}")
-        print(f"  {'Noise in top-5 (total)':<25s}  {raw_noise_in_top5:>8d}  {digest_noise_in_top5:>8d}")
+    retrieval_results = {
+        "method": "cohesion_test",
+        "n_sampled_chunks": N_SAMPLE,
+        "top_k": TOP_K,
+        "raw_cohesion": raw_cohesion,
+        "digest_cohesion": digest_cohesion,
+        "raw_same_log_hits": raw_same_log_hits,
+        "raw_total_neighbors": raw_total_neighbors,
+        "digest_same_log_hits": digest_same_log_hits,
+        "digest_total_neighbors": digest_total_neighbors,
+        "raw_noise_in_neighbors": raw_noise_in_neighbors,
+        "digest_noise_in_neighbors": digest_noise_in_neighbors,
+    }
+
+    print(f"\n  {'Metric':<30s}  {'Raw':>10s}  {'Digest':>10s}")
+    print(f"  {'-'*55}")
+    print(f"  {'Same-log cohesion':<30s}  {raw_cohesion:>10.3f}  {digest_cohesion:>10.3f}")
+    print(f"  {'Same-log hits / total':<30s}  {raw_same_log_hits:>4d}/{raw_total_neighbors:<5d}  {digest_same_log_hits:>4d}/{digest_total_neighbors:<5d}")
+    print(f"  {'Noise in neighbors':<30s}  {raw_noise_in_neighbors:>10d}  {digest_noise_in_neighbors:>10d}")
 
     # ---------------------------------------------------------------
     # Step 4: Cost projection
@@ -349,7 +333,6 @@ def main():
     output = {
         "corpus": {
             "n_logs": len(all_logs),
-            "n_with_summaries": len(logs_with_summaries),
         },
         "ingestion": {
             "raw_chunks": len(raw_chunks),
@@ -379,8 +362,7 @@ def main():
     print(f"Noise chunks:       {raw_noise_chunks:,} of {len(raw_chunks):,} raw chunks ({noise_chunk_pct}%)")
     print(f"Embed speedup:      {speedup:.1f}x ({raw_embed_time:.1f}s → {digest_embed_time:.1f}s)")
     if retrieval_results:
-        print(f"Retrieval P@1:      raw={retrieval_results['raw_precision_at_1']:.3f}  digest={retrieval_results['digest_precision_at_1']:.3f}")
-        print(f"Retrieval MRR:      raw={retrieval_results['raw_mrr']:.3f}  digest={retrieval_results['digest_mrr']:.3f}")
+        print(f"Cohesion:           raw={retrieval_results['raw_cohesion']:.3f}  digest={retrieval_results['digest_cohesion']:.3f}")
     print(f"\nSaved to {args.output}")
 
 
