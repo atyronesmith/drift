@@ -76,3 +76,73 @@ The distillation question reframes drift from a quality metric to a cost optimiz
 - **Low functional equivalence** → the LLM is doing non-trivial work. Keep it, measure the variance, and gate the output.
 
 This gives `drift measure` a prescriptive output beyond "here's how much your outputs vary." It answers: **should you even be using an LLM for this task?**
+
+## Drift as Task-Aware Compression
+
+Drift follows the same fundamental rules as lossless text compression. Both identify and eliminate redundancy — the difference is that drift is *lossy* and *task-aware*: the discarded bits are guaranteed to be noise for the downstream task, so reconstruction isn't needed.
+
+### The Entropy Bound
+
+Shannon's source coding theorem establishes that no lossless compressor can encode data below its entropy rate. Drift faces the same limit: **you cannot reduce a document below its information content.**
+
+A document's Shannon entropy measures the average information per symbol. Low entropy means high redundancy — predictable, repetitive content that a compressor (or drift) can eliminate. High entropy means every token carries unique information — nothing to remove.
+
+This maps directly to drift's observed results:
+
+| Corpus | Entropy Profile | Redundancy | Drift Impact |
+|--------|----------------|------------|-------------|
+| Ansible logs | Very low — `ok:`, `changed:`, `skipping:` repeated thousands of times | ~80% | 82% chunk reduction, 6.8x faster |
+| TechQA (IBM support) | Moderate — template headers/footers across documents | ~11% | 11% reduction, +3.7% nDCG |
+| EManual (electronics) | High — unique product descriptions | ~0% | No-op |
+| CuAD (legal contracts) | High — unique contract clauses | ~0% | No-op |
+
+**Drift impact is inversely proportional to document entropy.** High-entropy documents (unique natural language) pass through unchanged. Low-entropy documents (repetitive logs, template-heavy support docs) compress dramatically.
+
+### Unifying Input and Output
+
+This entropy framing unifies all of drift's techniques under one principle:
+
+**Input side** (pre-digestion):
+- Strips low-entropy content from documents — boilerplate lines, repeated patterns, separator noise
+- Impact bounded by the fraction of input tokens below the entropy floor
+- Equivalent to a compressor that discards redundancy before the data enters the pipeline
+
+**Output side** (rule extraction):
+- Replaces low-entropy LLM output tokens with deterministic rules (regex, literals)
+- Zero-entropy tokens (always the same output) → perfect candidates for rule extraction
+- Equivalent to a compressor that recognizes constant functions and replaces them with lookup tables
+
+**Classification** (classifier distillation):
+- Replaces low-entropy categorical decisions with small classifiers (logistic regression)
+- Impact bounded by how predictable the classification is from input features alone
+- Equivalent to a compressor that recognizes a mapping function and encodes it directly
+
+In all three cases, drift exploits the gap between the data's actual entropy and the capacity being spent to process it. An LLM is a maximally expressive processor — using it on zero-entropy tokens is like using a general-purpose codec on a file of all zeros.
+
+### Predictive Power
+
+This gives drift a pre-flight diagnostic: **measure corpus-level entropy before running the pipeline.** If document entropy is high, drift will have minimal impact — don't bother. If entropy is low, large gains are likely.
+
+Concretely:
+- Compute per-line entropy across the corpus (character-level or token-level)
+- Measure cross-document repetition rate (lines appearing in >N% of documents)
+- Estimate within-document redundancy (repeated patterns, boilerplate fraction)
+
+These three signals predict drift's impact without running the full pipeline. High redundancy at any level → drift will help. Low redundancy everywhere → the documents are already information-dense and drift is a no-op.
+
+### The Scope Boundary
+
+This framing draws a clear boundary around drift's applicability:
+
+**Drift works when the data has low entropy relative to the task.** This includes:
+- Log files (massive repetition, low information density)
+- Template-generated documents (shared boilerplate across instances)
+- Structured extraction (LLM output is largely deterministic)
+- Classification with finite categories (bounded output entropy)
+
+**Drift does not help when entropy is high.** This includes:
+- Free-form natural language documents (every token is informative)
+- Creative or open-ended generation (high output entropy by design)
+- RAG over clean document collections (nothing redundant to remove)
+
+This is not a limitation to work around — it's a fundamental information-theoretic bound. You cannot compress past the entropy floor, and drift cannot reduce past the information content. The same rules that govern lossless compression govern task-aware preprocessing.
