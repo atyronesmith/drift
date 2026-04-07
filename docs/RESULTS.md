@@ -1094,3 +1094,71 @@ Pre-digestion's value **scales with corpus noisiness**:
 - **Clean corpora** (manuals, contracts): safe no-op — no harm, no help
 
 This validates pre-digestion as a **safe default** in any RAG pipeline. It helps where noise exists and costs nothing where it doesn't. The general pre-digester requires no domain knowledge — boilerplate detection is fully corpus-driven.
+
+---
+
+## Experiment 17: Pipeline Drift Protection
+
+**Date**: 2026-04-07
+
+**Goal**: Apply per-step hybrid rules to multi-step pipelines to reduce compounding variance, and measure whether anchoring inter-step communication reduces downstream drift.
+
+### Background
+
+Multi-step pipelines show compounding variance: each step's textual drift feeds into the next step's input, amplifying variability. From Experiment 2, the structured pipeline showed edit distances of 0.27 → 0.52 → 0.34 across 3 steps on Vertex Claude. The hybrid framework (rules + LLM) reduces drift to zero for deterministic fields in single-step tasks. This experiment extends hybrid execution to individual pipeline steps.
+
+### Setup
+
+- **Task**: code_review (3-step pipeline: reviewer → implementer → verifier)
+- **Model**: Claude Sonnet (Vertex AI) for drift measurement; qwen2.5:32b (Ollama) for probing
+- **Runs**: 10 per configuration
+- **Probing**: `drift probe-pipeline` on qwen2.5:32b to identify deterministic fields
+- **Rules**: Reviewer (3 literal rules: severity=critical, category=security ×2), Verifier (2 literal rules: status=pass, remaining_issues=[])
+- **Implementer**: No hybrid rules (produces code, not JSON), but benefits from consistent upstream input
+
+### Probing Results (qwen2.5:32b)
+
+| Step | Tokens | Deterministic | High Entropy |
+|------|--------|---------------|-------------|
+| Reviewer | 114 | 77% | 15% |
+| Implementer | 82 | 98% | 0% |
+| Verifier | 34 | 71% | 15% |
+
+### Ollama Results (Control)
+
+Both structured and hybrid pipelines produce **100% identical outputs** across 10 runs on single-GPU Ollama qwen2.5:32b. Edit distance = 0.0 at all steps. This confirms the hybrid plumbing works without introducing any regression, but single-GPU Ollama is already deterministic at temp=0 (Experiment 7), so there's no drift to reduce.
+
+### Vertex Claude Results
+
+| Step | Structured ED | Hybrid ED | Reduction | Structured EM | Hybrid EM |
+|------|--------------|-----------|-----------|---------------|-----------|
+| Reviewer | 0.2704 | 0.1749 | -35% | 10% | 10% |
+| Implementer | 0.4116 | 0.0000 | **-100%** | 10% | **100%** |
+| Verifier | 0.3719 | 0.0842 | -77% | 10% | **90%** |
+
+**Final pipeline output**: Structured ED=0.3719 (10 unique) → Hybrid ED=0.0842 (2 unique). **77% drift reduction.**
+
+**Latency**: Structured 16.1s → Hybrid 8.9s total. **45% faster.**
+
+### Cascade Effect
+
+The most striking result is the implementer step: **zero edit distance with no hybrid rules applied**. Because the reviewer's hybrid output anchors the JSON structure (severity, category fields locked by rules), the implementer receives near-identical input across runs and produces identical code. The cascade that normally *amplifies* drift now *suppresses* it — deterministic upstream fields propagate consistency downstream.
+
+### Functional Equivalence
+
+| Config | Equivalence | Failure Mode |
+|--------|-------------|-------------|
+| Structured | 80% (8/10) | 2 variants fail `works_without_row_factory` |
+| Hybrid | 0% (0/10) | All variants fail `batch_query` |
+
+Functional equivalence tells a nuanced story. The structured pipeline produces 10 different code variants, 8 of which pass all tests. The hybrid pipeline produces 1 deterministic code variant that consistently misses the N+1 query optimization (`batch_query` test). The anchored reviewer output presents issues in a fixed order and phrasing that doesn't trigger the implementer to add batch querying.
+
+This is a trade-off: hybrid gives **perfect consistency** (you get the same answer every time) but the anchored answer may differ from what the model would produce without rules. For deterministic fields this is fine — but downstream behavioral effects need validation.
+
+### Key Takeaways
+
+1. **Per-step hybrid rules break the compounding drift curve.** Edit distance drops 77% at the final step.
+2. **Cascade amplification reverses.** Anchoring upstream steps makes downstream steps deterministic even without their own rules.
+3. **Latency improves 45%** — rules are instant, and the focused LLM prompt is smaller.
+4. **Functional validation is essential.** Drift reduction doesn't guarantee functional equivalence — the anchored variant may have different behavioral characteristics than the natural distribution.
+5. **Infrastructure matters.** On deterministic infrastructure (single-GPU Ollama), hybrid adds no drift value. The benefit is specific to non-deterministic inference (cloud APIs, multi-GPU, batched serving).
