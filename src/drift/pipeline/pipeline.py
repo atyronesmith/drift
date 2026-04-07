@@ -8,12 +8,14 @@ import click
 
 from drift.providers.factory import make_provider
 from drift.pipeline.transforms import run_post_process
+from drift.hybrid.executor import run_hybrid
 
 
 @dataclass
 class StepResult:
     name: str
     response: dict  # LLMResponse.to_dict()
+    hybrid_metadata: dict | None = None
 
 
 @dataclass
@@ -60,13 +62,47 @@ async def _run_step(
         template = "{input}"
     prompt = _render_prompt(template, context)
 
-    click.echo(f"    {prefix}Step {index + 1}/{total} ({name})...", nl=False)
-    response = await provider.complete(system, prompt, temperature=step.get("temperature", 0))
-    click.echo(f" {response.total_ms:.0f}ms")
+    hybrid_cfg = step.get("hybrid")
 
-    result = StepResult(name=name, response=response.to_dict())
+    if hybrid_cfg:
+        # Hybrid execution: rules first, then focused LLM call
+        click.echo(f"    {prefix}Step {index + 1}/{total} ({name}) [hybrid]...", nl=False)
+        hybrid_result = await run_hybrid(
+            provider, system, prompt,
+            rules=hybrid_cfg.get("rules", []),
+            llm_fields=hybrid_cfg.get("llm_fields", []),
+            hybrid_prompt_template=hybrid_cfg.get("hybrid_prompt_template"),
+            temperature=step.get("temperature", 0),
+            merge_mode=hybrid_cfg.get("merge_mode", "llm_over_rules"),
+            output_mode=hybrid_cfg.get("output_mode", "merge"),
+        )
+        click.echo(f" {hybrid_result.response.total_ms:.0f}ms"
+                    f" (rules: {hybrid_result.rules_matched}/{hybrid_result.rules_applied})")
 
-    response_content = response.content
+        hybrid_meta = {
+            "rules_applied": hybrid_result.rules_applied,
+            "rules_matched": hybrid_result.rules_matched,
+            "extracted": hybrid_result.extracted,
+        }
+        result = StepResult(
+            name=name,
+            response=hybrid_result.response.to_dict(),
+            hybrid_metadata=hybrid_meta,
+        )
+
+        if hybrid_result.merged:
+            response_content = json.dumps(hybrid_result.merged)
+        else:
+            response_content = hybrid_result.raw_llm_response
+    else:
+        # Standard LLM execution
+        click.echo(f"    {prefix}Step {index + 1}/{total} ({name})...", nl=False)
+        response = await provider.complete(system, prompt, temperature=step.get("temperature", 0))
+        click.echo(f" {response.total_ms:.0f}ms")
+
+        result = StepResult(name=name, response=response.to_dict())
+        response_content = response.content
+
     if "post_process" in step:
         response_content = run_post_process(
             step["post_process"], response_content, context, task_dir

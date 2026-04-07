@@ -29,10 +29,12 @@ def resolve_task_prompts(config: dict, tasks_dir: Path) -> dict:
     # Resolve step-level prompt file refs (pipelines)
     for step in exp.get("steps", []):
         _resolve_prompt_fields(step, task_dir)
+        _resolve_hybrid_spec(step, task_dir)
         # Handle loop steps with nested inner steps
         if step.get("type") == "loop":
             for inner_step in step.get("steps", []):
                 _resolve_prompt_fields(inner_step, task_dir)
+                _resolve_hybrid_spec(inner_step, task_dir)
 
     # Resolve hybrid spec file
     if "hybrid_spec_file" in exp and "hybrid_spec" not in exp:
@@ -43,6 +45,16 @@ def resolve_task_prompts(config: dict, tasks_dir: Path) -> dict:
             del exp["hybrid_spec_file"]
 
     return config
+
+
+def _resolve_hybrid_spec(d: dict, task_dir: Path | None) -> None:
+    """Resolve hybrid_spec_file in a step dict."""
+    if "hybrid_spec_file" in d and "hybrid" not in d:
+        import yaml
+        spec_path = (task_dir or Path.cwd()) / d["hybrid_spec_file"]
+        if spec_path.exists():
+            d["hybrid"] = yaml.safe_load(spec_path.read_text())
+            del d["hybrid_spec_file"]
 
 
 def _resolve_prompt_fields(d: dict, task_dir: Path | None) -> None:
