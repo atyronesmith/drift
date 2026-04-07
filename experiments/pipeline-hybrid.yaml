@@ -11,7 +11,6 @@ experiment:
       system_prompt_file: reviewer_structured_system.md
       user_prompt: |
         {input}
-      hybrid_spec_file: hybrid_reviewer.yaml
 
     - name: implementer
       provider: ollama
