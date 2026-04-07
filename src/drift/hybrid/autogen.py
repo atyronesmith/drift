@@ -1196,6 +1196,43 @@ def synthesize_rules_multi(
     return SynthesisResult(rules=final_rules, llm_fields=llm_top_level, stats=stats)
 
 
+def synthesize_pipeline(
+    step_probes: list[dict],
+    step_inputs: list[str],
+    entropy_threshold: float = 0.3,
+) -> list[SynthesisResult | None]:
+    """Auto-generate hybrid rules for each step of a pipeline.
+
+    Runs synthesize_rules() on each JSON-producing step. Steps whose
+    output is not valid JSON (e.g., code-producing steps) are skipped
+    and return None.
+
+    Args:
+        step_probes: Per-step probe data dicts (from probe-pipeline output).
+        step_inputs: Per-step input text (the rendered prompt each step received).
+        entropy_threshold: Fields below this are rule candidates.
+
+    Returns:
+        List of SynthesisResult (one per step), None for non-JSON steps.
+    """
+    results = []
+    for i, (probe_data, input_text) in enumerate(zip(step_probes, step_inputs)):
+        name = probe_data.get("step_name", f"step_{i}")
+
+        # Check if output is JSON
+        parsed = _parse_llm_output(probe_data)
+        if parsed is None:
+            results.append(None)
+            continue
+
+        result = synthesize_rules(probe_data, input_text, entropy_threshold)
+        result.stats["step_name"] = name
+        result.stats["step_index"] = i
+        results.append(result)
+
+    return results
+
+
 def render_hybrid_yaml(result: SynthesisResult) -> str:
     """Render a SynthesisResult as a hybrid.yaml string."""
     import yaml as pyyaml
