@@ -20,15 +20,28 @@ class HybridResult:
     response: object = None  # provider response for timing
 
 
-def deep_merge(base: dict, overlay: dict) -> dict:
-    """Merge overlay into base, preferring overlay values."""
-    result = dict(base)
-    for key, val in overlay.items():
-        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
-            result[key] = deep_merge(result[key], val)
-        else:
-            result[key] = val
-    return result
+def deep_merge(base, overlay):
+    """Merge overlay into base, preferring overlay values.
+
+    Handles dicts (recursive merge) and lists (element-wise merge).
+    """
+    if isinstance(base, dict) and isinstance(overlay, dict):
+        result = dict(base)
+        for key, val in overlay.items():
+            if key in result:
+                result[key] = deep_merge(result[key], val)
+            else:
+                result[key] = val
+        return result
+    if isinstance(base, list) and isinstance(overlay, list):
+        result = list(overlay)
+        for i, item in enumerate(base):
+            if i < len(result):
+                result[i] = deep_merge(item, result[i])
+            else:
+                result.append(item)
+        return result
+    return overlay
 
 
 def build_hybrid_prompt(
