@@ -1,0 +1,79 @@
+experiment:
+  name: pipeline-hybrid-vertex
+  type: pipeline
+  task: code_review
+
+  steps:
+    - name: reviewer
+      provider: vertex
+      model: claude-sonnet-4-6
+      temperature: 0
+      system_prompt: |
+        You are an expert code reviewer. Analyze the provided code and return
+        your findings as a JSON object with exactly this schema:
+
+        {
+          "issues": [
+            {
+              "severity": "critical|high|medium|low",
+              "line": <int>,
+              "category": "security|performance|reliability|style",
+              "description": "<one sentence>",
+              "fix": "<one sentence describing the fix>"
+            }
+          ]
+        }
+
+        Return ONLY the JSON object. No markdown, no explanation, no code fences.
+      user_prompt: |
+        {input}
+      hybrid_spec_file: hybrid_reviewer.yaml
+
+    - name: implementer
+      provider: vertex
+      model: claude-sonnet-4-6
+      temperature: 0
+      system_prompt: |
+        You are a senior Python developer. You will receive the original code
+        and a structured JSON list of issues to fix. Implement ALL fixes.
+        Return ONLY the corrected Python function. No markdown, no explanation,
+        no code fences. Just the raw Python code.
+      user_prompt: |
+        Original code:
+
+        {input}
+
+        Issues to fix (JSON):
+
+        {step_reviewer}
+
+    - name: verifier
+      provider: vertex
+      model: claude-sonnet-4-6
+      temperature: 0
+      system_prompt: |
+        You are a code quality verifier. You will receive an original function
+        and a revised version. Check that all issues are fixed and no new
+        issues were introduced. Return your assessment as a JSON object:
+
+        {
+          "status": "pass|fail",
+          "remaining_issues": [
+            {
+              "severity": "critical|high|medium|low",
+              "description": "<one sentence>"
+            }
+          ],
+          "summary": "<one sentence overall assessment>"
+        }
+
+        Return ONLY the JSON object. No markdown, no explanation, no code fences.
+      user_prompt: |
+        Original code:
+
+        {input}
+
+        Revised code:
+
+        {step_implementer}
+      hybrid_spec_file: hybrid_verifier.yaml

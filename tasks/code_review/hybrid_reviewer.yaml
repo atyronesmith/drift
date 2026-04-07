@@ -1,0 +1,20 @@
+# Auto-generated from probe data, manually refined.
+# Reviewer step: anchor deterministic fields, LLM handles descriptions.
+
+rules:
+  - path: issues[0].severity
+    type: literal
+    value: "critical"
+
+  - path: issues[0].category
+    type: literal
+    value: "security"
+
+  - path: issues[1].category
+    type: literal
+    value: "security"
+
+llm_fields:
+  - issues
+
+output_mode: merge

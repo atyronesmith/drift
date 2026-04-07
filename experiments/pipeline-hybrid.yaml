@@ -1,0 +1,47 @@
+experiment:
+  name: pipeline-hybrid
+  type: pipeline
+  task: code_review
+
+  steps:
+    - name: reviewer
+      provider: ollama
+      model: qwen2.5:32b
+      temperature: 0
+      system_prompt_file: reviewer_structured_system.md
+      user_prompt: |
+        {input}
+      hybrid_spec_file: hybrid_reviewer.yaml
+
+    - name: implementer
+      provider: ollama
+      model: qwen2.5:32b
+      temperature: 0
+      system_prompt: |
+        You are a senior Python developer. You will receive the original code
+        and a structured JSON list of issues to fix. Implement ALL fixes.
+        Return ONLY the corrected Python function. No markdown, no explanation,
+        no code fences. Just the raw Python code.
+      user_prompt: |
+        Original code:
+
+        {input}
+
+        Issues to fix (JSON):
+
+        {step_reviewer}
+
+    - name: verifier
+      provider: ollama
+      model: qwen2.5:32b
+      temperature: 0
+      system_prompt_file: verifier_structured_system.md
+      user_prompt: |
+        Original code:
+
+        {input}
+
+        Revised code:
+
+        {step_implementer}
+      hybrid_spec_file: hybrid_verifier.yaml

@@ -1,0 +1,16 @@
+# Auto-generated from probe data, manually refined.
+# Verifier step: anchor status and empty remaining_issues, LLM handles summary.
+
+rules:
+  - path: status
+    type: literal
+    value: "pass"
+
+  - path: remaining_issues
+    type: literal
+    value: []
+
+llm_fields:
+  - summary
+
+output_mode: merge
