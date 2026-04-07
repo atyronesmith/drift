@@ -1113,8 +1113,9 @@ Multi-step pipelines show compounding variance: each step's textual drift feeds 
 - **Model**: Claude Sonnet (Vertex AI) for drift measurement; qwen2.5:32b (Ollama) for probing
 - **Runs**: 10 per configuration
 - **Probing**: `drift probe-pipeline` on qwen2.5:32b to identify deterministic fields
-- **Rules**: Reviewer (3 literal rules: severity=critical, category=security ×2), Verifier (2 literal rules: status=pass, remaining_issues=[])
-- **Implementer**: No hybrid rules (produces code, not JSON), but benefits from consistent upstream input
+- **Rules (initial)**: Reviewer (3 literal rules on `issues[0]`/`issues[1]`: severity, category), Verifier (2 literal rules: status=pass, remaining_issues=[])
+- **Rules (corrected)**: Verifier only (reviewer hybrid removed after discovering array-constrained output bug)
+- **Implementer**: No hybrid rules (produces code, not JSON)
 
 ### Probing Results (qwen2.5:32b)
 
@@ -1128,7 +1129,7 @@ Multi-step pipelines show compounding variance: each step's textual drift feeds 
 
 Both structured and hybrid pipelines produce **100% identical outputs** across 10 runs on single-GPU Ollama qwen2.5:32b. Edit distance = 0.0 at all steps. This confirms the hybrid plumbing works without introducing any regression, but single-GPU Ollama is already deterministic at temp=0 (Experiment 7), so there's no drift to reduce.
 
-### Vertex Claude Results
+### Vertex Claude Results — Initial Run (Reviewer + Verifier Hybrid)
 
 | Step | Structured ED | Hybrid ED | Reduction | Structured EM | Hybrid EM |
 |------|--------------|-----------|-----------|---------------|-----------|
@@ -1136,29 +1137,44 @@ Both structured and hybrid pipelines produce **100% identical outputs** across 1
 | Implementer | 0.4116 | 0.0000 | **-100%** | 10% | **100%** |
 | Verifier | 0.3719 | 0.0842 | -77% | 10% | **90%** |
 
-**Final pipeline output**: Structured ED=0.3719 (10 unique) → Hybrid ED=0.0842 (2 unique). **77% drift reduction.**
+**Final pipeline output**: Structured ED=0.3719 → Hybrid ED=0.0842. **77% drift reduction.**
 
-**Latency**: Structured 16.1s → Hybrid 8.9s total. **45% faster.**
+These numbers looked excellent, but functional testing revealed a critical flaw: **0/10 hybrid variants passed `batch_query`**. The structured pipeline (10 distinct code variants) passed 8/10. Investigation uncovered two bugs and a fundamental limitation.
 
-### Cascade Effect
+### Bug Fixes
 
-The most striking result is the implementer step: **zero edit distance with no hybrid rules applied**. Because the reviewer's hybrid output anchors the JSON structure (severity, category fields locked by rules), the implementer receives near-identical input across runs and produces identical code. The cascade that normally *amplifies* drift now *suppresses* it — deterministic upstream fields propagate consistency downstream.
+**Bug 1: Array-indexed path handling.** `set_nested("issues[0].severity", ...)` created a dict key `"issues[0]"` instead of navigating into a list structure. Fixed by adding `_parse_path_segments()` to decompose `issues[0].severity` into `["issues", 0, "severity"]` and rewriting `set_nested`/`_get_nested` to handle integer segments.
 
-### Functional Equivalence
+**Bug 2: List merging in `deep_merge`.** Rules produce `{"issues": [{"severity": "critical"}, ...]}` while the LLM produces `{"issues": [{"line": 3, ...}, ...]}`. The original `deep_merge` only handled dicts, so lists were replaced wholesale instead of merged element-wise. Fixed by adding a list branch that merges corresponding elements.
 
-| Config | Equivalence | Failure Mode |
-|--------|-------------|-------------|
-| Structured | 80% (8/10) | 2 variants fail `works_without_row_factory` |
-| Hybrid | 0% (0/10) | All variants fail `batch_query` |
+### Fundamental Limitation: Array-Constrained Output
 
-Functional equivalence tells a nuanced story. The structured pipeline produces 10 different code variants, 8 of which pass all tests. The hybrid pipeline produces 1 deterministic code variant that consistently misses the N+1 query optimization (`batch_query` test). The anchored reviewer output presents issues in a fixed order and phrasing that doesn't trigger the implementer to add batch querying.
+After fixing both bugs, the `batch_query` failure persisted. Root cause: **literal rules on array-indexed paths implicitly constrain the output array length**. The probe discovered 2 issues (both `category: security`), so the rules locked `issues[0]` and `issues[1]`. The hybrid prompt tells the LLM "these fields are already extracted," so it only fills in the remaining fields for those 2 elements and doesn't discover additional issues. The structured reviewer naturally finds 5–6 issues including `category: performance` for the N+1 query pattern, which is what triggers the implementer to add batch queries.
 
-This is a trade-off: hybrid gives **perfect consistency** (you get the same answer every time) but the anchored answer may differ from what the model would produce without rules. For deterministic fields this is fine — but downstream behavioral effects need validation.
+**Insight**: Literal rules on array-indexed paths should not be used for open-ended outputs where the array length varies per input. They are only safe when the array structure is fixed (e.g., a config with exactly N entries).
+
+### Vertex Claude Results — Corrected Run (Verifier-Only Hybrid)
+
+After removing reviewer hybrid rules:
+
+| Step | Structured ED | Hybrid ED | Delta |
+|------|--------------|-----------|-------|
+| Reviewer | 0.2704 | 0.2727 | +0.002 |
+| Implementer | 0.4116 | 0.5578 | +0.146 |
+| Verifier | 0.3719 | 0.4360 | +0.064 |
+
+**Functional equivalence**: Structured 80% (8/10) → Hybrid 90% (9/10). All failures are the pre-existing `works_without_row_factory` flaky test — not a meaningful difference.
+
+**This is a null result.** Verifier-only hybrid provides no drift reduction. The verifier's anchored fields (`status=pass`, `remaining_issues=[]`) are already consistent in the structured output, so the rules add no value. The hybrid prompt format slightly perturbs the summary field, producing marginally more drift.
+
+### Cascade Effect (from initial run)
+
+The initial run's most striking result — the implementer achieving zero edit distance with no hybrid rules — was real but came at the cost of functional correctness. Anchoring the reviewer's output structure locked the input to the implementer, making it perfectly consistent but consistently wrong (missing the performance issue). The cascade that normally *amplifies* drift can indeed *suppress* it, but only if the anchored structure is complete. This is a fundamental tension: **the more you constrain, the more you risk omitting variable-length findings.**
 
 ### Key Takeaways
 
-1. **Per-step hybrid rules break the compounding drift curve.** Edit distance drops 77% at the final step.
-2. **Cascade amplification reverses.** Anchoring upstream steps makes downstream steps deterministic even without their own rules.
-3. **Latency improves 45%** — rules are instant, and the focused LLM prompt is smaller.
-4. **Functional validation is essential.** Drift reduction doesn't guarantee functional equivalence — the anchored variant may have different behavioral characteristics than the natural distribution.
-5. **Infrastructure matters.** On deterministic infrastructure (single-GPU Ollama), hybrid adds no drift value. The benefit is specific to non-deterministic inference (cloud APIs, multi-GPU, batched serving).
+1. **Array-indexed literal rules constrain output structure.** They're safe for fixed schemas but break open-ended outputs. This is the primary blocker for pipeline hybrid on review-style tasks.
+2. **Verifier-only hybrid is a null result** for this pipeline — the fields it anchors are already consistent.
+3. **The cascade effect is real but double-edged.** Anchoring upstream steps eliminates downstream drift, but if the anchor is incomplete, it eliminates the correct behavior too.
+4. **Infrastructure matters.** On deterministic infrastructure (single-GPU Ollama), hybrid adds no drift value. The benefit is specific to non-deterministic inference (cloud APIs, multi-GPU, batched serving).
+5. **Pipeline hybrid needs smarter rules.** To work on review tasks, rules would need to anchor *structure* (e.g., JSON schema, field names) without constraining *content* (e.g., number of issues found). This points toward schema-level rules rather than literal value rules.

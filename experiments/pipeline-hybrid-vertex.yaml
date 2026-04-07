@@ -27,7 +27,6 @@ experiment:
         Return ONLY the JSON object. No markdown, no explanation, no code fences.
       user_prompt: |
         {input}
-      hybrid_spec_file: hybrid_reviewer.yaml
 
     - name: implementer
       provider: vertex
