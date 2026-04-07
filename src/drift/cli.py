@@ -1586,6 +1586,124 @@ def distill(config_path: str, input_dir: str, output: str, n_samples: int,
     click.echo(f"  drift compile {output} --prompt <system_prompt.md> -o engine.py")
 
 
+@cli.command(name="probe-pipeline")
+@click.argument("config_path", type=click.Path(exists=True))
+@click.option("--model", default="qwen2.5:32b", help="Ollama model for probing (default: qwen2.5:32b).")
+@click.option("--output", "-o", required=True, type=click.Path(),
+              help="Output directory for per-step probe JSON files.")
+@click.option("--top-logprobs", default=5, help="Number of top alternatives per token.")
+@click.option("--rules", is_flag=True, help="Run rule extraction analysis on JSON steps.")
+def probe_pipeline(config_path: str, model: str, output: str, top_logprobs: int, rules: bool):
+    """Probe token-level confidence for each pipeline step.
+
+    Runs each step sequentially with logprobs via Ollama, chaining
+    real outputs so each step sees realistic input from the prior step.
+    Saves per-step probe JSON (step_0_reviewer.json, etc.) for
+    downstream rule synthesis.
+
+    Example:
+        drift probe-pipeline experiments/pipeline-structured.yaml \\
+            --model qwen2.5:32b -o results/pipeline-probes/
+    """
+    from drift.probing.logprobs import probe_with_logprobs
+    from drift.pipeline.pipeline import _render_prompt
+
+    config = yaml.safe_load(Path(config_path).read_text())
+    config = resolve_task_prompts(config, Path.cwd() / "tasks")
+    exp = config["experiment"]
+
+    if exp.get("type") != "pipeline":
+        click.echo("Error: probe-pipeline requires a pipeline experiment.", err=True)
+        sys.exit(1)
+
+    steps = exp["steps"]
+    initial_input = exp["input"]
+    out_dir = Path(output)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    click.echo(f"Pipeline probe: {exp['name']}")
+    click.echo(f"  Steps: {len(steps)}")
+    click.echo(f"  Model: {model} (Ollama)")
+    click.echo(f"  Output: {out_dir}")
+    click.echo()
+
+    context = {"input": initial_input}
+
+    for i, step in enumerate(steps):
+        if step.get("type") == "loop":
+            click.echo(f"  Step {i}/{len(steps)} ({step.get('name', 'loop')}): "
+                        f"skipping loop step (not supported for probing)")
+            continue
+
+        name = step.get("name", f"step_{i}")
+        system = step["system_prompt"]
+
+        # Determine user prompt template (same logic as pipeline runner)
+        template = step.get("user_prompt", "{previous_output}")
+        if i == 0 and "user_prompt" not in step:
+            template = "{input}"
+        prompt = _render_prompt(template, context)
+
+        click.echo(f"  Step {i}/{len(steps)} ({name})...", nl=False)
+
+        result = probe_with_logprobs(
+            system=system,
+            prompt=prompt,
+            model=model,
+            top_logprobs=top_logprobs,
+            temperature=step.get("temperature", 0),
+        )
+
+        stats = result.entropy_stats()
+        click.echo(f" {stats['num_tokens']} tokens, "
+                    f"{stats['pct_deterministic']:.0%} deterministic, "
+                    f"{stats['pct_high_entropy']:.0%} high entropy")
+
+        # Build probe data
+        segments = result.segment_by_entropy()
+        high = result.high_entropy_tokens(threshold=0.5)
+
+        probe_data = {
+            "step_index": i,
+            "step_name": name,
+            "model": result.model,
+            "stats": stats,
+            "segments": [
+                {"type": s["type"], "text": s["text"], "start": s["start"], "end": s["end"]}
+                for s in segments
+            ],
+            "high_entropy_tokens": [
+                {"index": idx, "token": tok, "entropy": ent,
+                 "alternatives": [a["token"] for a in result.tokens[idx].top_alternatives[:5]]}
+                for idx, tok, ent in high
+            ],
+            "tokens": [
+                {"token": t.token, "logprob": t.logprob, "entropy": t.entropy}
+                for t in result.tokens
+            ],
+        }
+
+        # Save step probe
+        probe_file = out_dir / f"step_{i}_{name}.json"
+        probe_file.write_text(json.dumps(probe_data, indent=2))
+
+        # Rule extraction analysis
+        if rules:
+            from drift.probing.synthesizer import analyze_fields, format_rules
+            input_text = initial_input if i == 0 else context.get("previous_output", "")
+            field_rules = analyze_fields(probe_data, input_text)
+            if field_rules:
+                click.echo(f"    {format_rules(field_rules)}")
+
+        # Chain output to next step's context
+        content = result.content
+        context["previous_output"] = content
+        context[f"step_{i}"] = content
+        context[f"step_{name}"] = content
+
+    click.echo(f"\nProbe data saved to {out_dir}/")
+
+
 @cli.command()
 @click.argument("model")
 @click.option("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0).")
