@@ -225,21 +225,63 @@ def _match_conditions(when: dict, extracted: dict) -> bool:
 
 
 def _get_nested(obj: dict, path: str):
-    """Get a value from a nested dict using dot notation."""
-    for key in path.split("."):
-        if isinstance(obj, dict):
+    """Get a value from a nested dict/list using dot notation with array indices."""
+    for key in _parse_path_segments(path):
+        if isinstance(key, int):
+            if isinstance(obj, list) and key < len(obj):
+                obj = obj[key]
+            else:
+                return None
+        elif isinstance(obj, dict):
             obj = obj.get(key)
         else:
             return None
     return obj
 
 
+def _parse_path_segments(path: str) -> list[str | int]:
+    """Parse a dotted path with array indices into segments.
+
+    "issues[0].severity" -> ["issues", 0, "severity"]
+    "ticket.stated_priority" -> ["ticket", "stated_priority"]
+    """
+    import re as _re
+    segments = []
+    for part in path.split("."):
+        m = _re.match(r"^(\w+)\[(\d+)\]$", part)
+        if m:
+            segments.append(m.group(1))
+            segments.append(int(m.group(2)))
+        else:
+            segments.append(part)
+    return segments
+
+
 def set_nested(obj: dict, path: str, value) -> None:
-    """Set a value in a nested dict using dot notation."""
-    keys = path.split(".")
-    for key in keys[:-1]:
-        obj = obj.setdefault(key, {})
-    obj[keys[-1]] = value
+    """Set a value in a nested dict/list using dot notation with array indices.
+
+    Supports paths like "issues[0].severity" by creating lists as needed.
+    """
+    segments = _parse_path_segments(path)
+    for i, key in enumerate(segments[:-1]):
+        next_key = segments[i + 1]
+        if isinstance(key, int):
+            while len(obj) <= key:
+                obj.append({} if isinstance(next_key, str) else [])
+            obj = obj[key]
+        else:
+            if isinstance(next_key, int):
+                obj = obj.setdefault(key, [])
+            else:
+                obj = obj.setdefault(key, {})
+
+    last = segments[-1]
+    if isinstance(last, int):
+        while len(obj) <= last:
+            obj.append(None)
+        obj[last] = value
+    else:
+        obj[last] = value
 
 
 def execute_rules(rules: list[dict], input_text: str) -> tuple[dict, list[RuleResult]]:
