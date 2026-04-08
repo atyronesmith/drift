@@ -180,7 +180,7 @@ def analyze_free_form(runs: list[dict], step_name: str) -> dict:
 
 
 def main():
-    base = Path("Path(__file__).parent.parent / "results"")
+    base = Path(__file__).parent.parent / "results"
 
     # Structured pipeline (JSON sandwich)
     structured_dir = base / "pipeline-structured" / "20260407T175205Z"

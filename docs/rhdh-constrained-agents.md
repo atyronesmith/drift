@@ -131,7 +131,7 @@ Every step is a constraint point. The agent's freedom is bounded at each layer, 
 
 ## How Drift Testing Applies to the platform
 
-Our drift measurements (`docs/agentic-sdlc-positioning.md`) showed that LLM non-determinism produces different outputs for the same inputs. In the the platform context, this means:
+Our drift measurements showed that LLM non-determinism produces different outputs for the same inputs (see [RESULTS.md](RESULTS.md)). In the the platform context, this means:
 
 ### Where Drift Still Matters
 
