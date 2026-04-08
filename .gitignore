@@ -4,3 +4,9 @@ datasets/
 __pycache__/
 .venv/
 *.egg-info/
+*.pyc
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.claude/

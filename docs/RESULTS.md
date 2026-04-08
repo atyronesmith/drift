@@ -396,7 +396,7 @@ For production deployments: **always use temp=0 when determinism matters.** Even
 
 ### Setup
 
-- **Model**: claude-sonnet-4-6 via Vertex AI (project: your-gcp-project-id, region: your-gcp-region)
+- **Model**: claude-sonnet-4-6 via Vertex AI
 - **Tasks**: data_extraction (10 runs), iterative_refactor (5 runs)
 - **Temperature**: 0
 

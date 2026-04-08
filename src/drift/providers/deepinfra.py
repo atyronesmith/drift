@@ -12,8 +12,8 @@ from drift.providers.base import LLMResponse
 class DeepInfraProvider:
     """Provider for DeepInfra's OpenAI-compatible API.
 
-    Uses curl subprocess to avoid endpoint security software blocking
-    Python's direct TCP connections.
+    Uses curl subprocess for HTTP requests to avoid endpoint security software
+    blocking Python's direct TCP connections.
     """
 
     BASE_URL = "https://api.deepinfra.com"
