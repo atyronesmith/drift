@@ -12,8 +12,8 @@ from drift.providers.base import LLMResponse
 class OllamaProvider:
     """Provider for Ollama's OpenAI-compatible API.
 
-    Uses curl subprocess to avoid endpoint security software blocking
-    Python's direct TCP connections to LAN addresses.
+    Uses curl subprocess for HTTP requests to avoid endpoint security software
+    blocking Python's direct TCP connections to LAN addresses.
     """
 
     def __init__(self, model: str, base_url: str | None = None):

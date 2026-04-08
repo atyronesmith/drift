@@ -151,3 +151,20 @@ src/drift/
 
 Core: httpx, pyyaml, numpy, scipy, python-Levenshtein, click.
 MLX (optional): mlx, mlx-lm (Apple Silicon only).
+Classifiers (optional): scikit-learn.
+
+## Documentation
+
+- [Technical paper](docs/PAPER.md) — full findings across 17 experiments
+- [Experiment results](docs/RESULTS.md) — detailed per-experiment data
+- [Hybrid framework](docs/HYBRID.md) — automated rule extraction pipeline
+- [MLX provider](docs/MLX.md) — Apple Silicon inference and attention probing
+- [Theory](docs/THEORY.md) — voting vs deliberation, distillation thresholds
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
+## License
+
+See [LICENSE](LICENSE).
