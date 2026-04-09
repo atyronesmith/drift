@@ -8,7 +8,7 @@ This document surveys available data on the overhead these layers introduce, ide
 
 ## The Safety Stack
 
-A production agentic AI call in a regulated enterprise (e.g., the the platform architecture described in [the platform-constrained-agents.md](the platform-constrained-agents.md)) may pass through some or all of the following layers:
+A production agentic AI call in a regulated enterprise may pass through some or all of the following layers:
 
 | Layer | Example Technology | Purpose | Category |
 |-------|-------------------|---------|----------|
