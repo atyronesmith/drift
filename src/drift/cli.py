@@ -256,8 +256,11 @@ def cli():
               help="Guard model for safety checking (e.g. llama-guard3:1b).")
 @click.option("--guard-base-url", default=None,
               help="Ollama base URL for guard model.")
+@click.option("--exclude-categories", default=None,
+              help="Comma-separated guard categories to ignore (e.g. S6,S8).")
 def run(config_path: str, runs: int, output_dir: str,
-        safety_guard: str | None, guard_base_url: str | None):
+        safety_guard: str | None, guard_base_url: str | None,
+        exclude_categories: str | None):
     """Run an experiment from a YAML config."""
     config = yaml.safe_load(Path(config_path).read_text())
     config = resolve_task_prompts(config, Path.cwd() / "tasks")
@@ -265,8 +268,11 @@ def run(config_path: str, runs: int, output_dir: str,
     guard = None
     if safety_guard:
         from drift.safety.guard import GuardModel
-        guard = GuardModel(model=safety_guard, base_url=guard_base_url)
-        click.echo(f"Safety guard: {safety_guard}")
+        excluded = [c.strip() for c in exclude_categories.split(",")] if exclude_categories else []
+        guard = GuardModel(model=safety_guard, base_url=guard_base_url,
+                           exclude_categories=excluded)
+        click.echo(f"Safety guard: {safety_guard}"
+                   + (f" (excluding {','.join(excluded)})" if excluded else ""))
 
     exp_type = config["experiment"].get("type", "baseline")
     if exp_type == "pipeline":

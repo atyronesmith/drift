@@ -229,6 +229,8 @@ def main():
                        help="Max outputs to check (0 = all)")
     parser.add_argument("--output", "-o", default=None,
                        help="Save detailed results to JSON")
+    parser.add_argument("--exclude-categories", default=None,
+                       help="Comma-separated categories to ignore (e.g. S6,S8)")
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -255,7 +257,10 @@ def main():
     print(f"Unique outputs (by content): {len(unique_outputs)}")
     print(f"Deduplication saved {len(outputs) - len(unique_outputs)} redundant checks")
 
-    guard = GuardModel(model=args.model, base_url=args.base_url)
+    excluded = [c.strip() for c in args.exclude_categories.split(",")] if args.exclude_categories else []
+    guard = GuardModel(model=args.model, base_url=args.base_url, exclude_categories=excluded)
+    if excluded:
+        print(f"Excluding categories: {', '.join(excluded)}")
 
     print(f"\nRunning guard checks with {args.model}...")
     start = time.perf_counter()
