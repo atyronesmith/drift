@@ -33,7 +33,11 @@ NVIDIA reports that running up to 5 GPU-accelerated guardrails in parallel adds 
 
 NeMo Guardrails supports a "single call" mode (since v0.6.0) that performs input validation, generation, and output validation in one LLM call, reducing both latency and token usage for simpler RAG scenarios.
 
-Source: [NVIDIA Technical Blog — Measuring Effectiveness and Performance of AI Guardrails](https://developer.nvidia.com/blog/measuring-the-effectiveness-and-performance-of-ai-guardrails-in-generative-ai-applications/)
+**2026 update**: The NeMo Guardrails team reports a **~40% reduction in baseline overhead** compared to the 2025 version. Per-layer latency is now estimated at **10–50ms** (down from 100–300ms typical), with optimized NVIDIA infrastructure achieving 50–150ms total across multiple layers. However, SmoothLLM-style schemes still add up to 10 extra inferences per prompt for robustness, and dialog rail complexity (Colang scripts, intent recognition) can re-introduce LLM calls that inflate the overhead beyond the per-layer estimates.
+
+Sources:
+- [NVIDIA Technical Blog — Measuring Effectiveness and Performance of AI Guardrails](https://developer.nvidia.com/blog/measuring-the-effectiveness-and-performance-of-ai-guardrails-in-generative-ai-applications/)
+- [Guardrails AI vs NeMo Guardrails: Complete Comparison 2026](https://is4.ai/blog/our-blog-1/guardrails-ai-vs-nemo-guardrails-comparison-2026-352)
 
 ### Llama Guard / LlamaFirewall
 
@@ -50,10 +54,18 @@ Combined, these three layers reduced attack success rate from 17.6% to 1.75% (a 
 
 **Open question**: The 42.7% utility figure is striking. If safety layers reject more than half of productive work, the effective compute cost per useful output more than doubles — but only if rejected outputs must be regenerated. The actual cost depends on the retry policy: does the system regenerate, fall back to a human, or return a canned response? No published study has measured the retry overhead or the downstream cost of false rejections.
 
+**2025–2026 update**: Llama Guard 4 (12B) is now available, and independent evaluations have revealed accuracy concerns. On the AEGIS safety dataset, LlamaGuard-3 variants achieved only **22–34% in-domain accuracy** — substantially below production standards. Lightweight alternatives like Sentence-BERT classifiers (67M parameters) now achieve comparable or better moderation efficacy (AUPRC 0.946, F1 0.89) with **sub-50ms latency**, suggesting the full LLM-based guard may be over-engineered for many use cases.
+
+**Gateway integration** is also a practical bottleneck. HAProxy testing on AWS g6.xlarge found that adding LLM-based prompt security (LlamaGuard, PromptGuard, ShieldGemma) reduced throughput from **100,000+ requests/second to ~60 requests/second** — a three-orders-of-magnitude degradation that makes LLM-based guards impractical for high-throughput gateway deployment.
+
+**AprielGuard** (ServiceNow, Dec 2025) introduces a two-stage design with reasoning-enabled and reasoning-free modes, offering a practical latency/explainability tradeoff. The reasoning-free mode is faster but less interpretable; the reasoning-enabled mode provides chain-of-thought justification at higher cost.
+
 Sources:
 - [Llama Guard 3-1B-INT4 (arXiv)](https://arxiv.org/html/2411.17713v1)
 - [LlamaFirewall (arXiv)](https://arxiv.org/abs/2505.03574)
 - [Benchmarking Llama Model Security Against OWASP Top 10](https://arxiv.org/html/2601.19970v1)
+- [HAProxy — Lessons Learned in LLM Prompt Security](https://www.haproxy.com/blog/lessons-learned-in-llm-prompt-security-securing-ai-with-ai)
+- [AprielGuard (arXiv)](https://arxiv.org/html/2512.20293v1)
 
 ### SGLang Constrained Decoding
 
@@ -66,6 +78,12 @@ SGLang's compressed finite-state machine approach enables 3x faster JSON decodin
 SGLang hides much of this cost by overlapping CPU-bound grammar computation with GPU inference. By contrast, vLLM shows significant performance degradation with guided decoding at batch sizes of 8+.
 
 Constrained decoding serves both safety (preventing malformed output) and reproducibility (enforcing structural consistency). It operates at the token level during generation, unlike post-hoc guardrails that evaluate completed output.
+
+**2025–2026 update**: The overhead picture has improved significantly. XGrammar (now the default backend in SGLang, vLLM, and TensorRT-LLM) approaches **near-zero overhead** for cached schemas. More surprisingly, constrained decoding can actually **reduce** latency in some cases — by simplifying the next-token prediction space and skipping generation of structural scaffolding tokens.
+
+SqueezeBits benchmarks (2025, Qwen3-8B/32B) comparing grammar backends found that **LLGuidance consistently outperforms XGrammar** when every request introduces a unique schema, because XGrammar's caching strategy is neutralized. Invalid JSON rates: XGrammar 2.21%, LLGuidance 0.12%.
+
+Without any guided decoding, models already produce schema-valid output 90–94% of the time. Guided decoding pushes this to 96–98.2% — a meaningful improvement but one that raises the question of whether the overhead is justified when the base rate is already high. For drift's use case, the answer is clear: even a 6% structural violation rate at high volume produces thousands of malformed outputs that break downstream pipelines.
 
 Sources:
 - [SqueezeBits — Guided Decoding Performance on vLLM and SGLang](https://blog.squeezebits.com/guided-decoding-performance-vllm-sglang)
@@ -91,11 +109,14 @@ Adding overhead only makes economic sense if the guardrails actually work. Avail
 - **arXiv:2503.24191**: Demonstrated that constrained decoding grammars can be weaponized to bypass safety mechanisms — the safety infrastructure itself becomes an attack surface.
 - **Statistical tail risk (Feb 2026)**: Claims of "99% safe" obscure the reality that adversarial attacks succeed 89% of the time at 10,000 attempts on GPT-4o.
 
+- **ShieldGemma prompt sensitivity (2025)**: ShieldGemma-2B showed **20.7 percentage point performance degradation** with certain prompt styles — suggesting it relies on specific prompt structures rather than understanding harmful content. Top-performing guard models like Qwen3Guard-8B varied only 1.0 percentage points across all seven prompt styles.
+
 These findings do not mean guardrails are worthless — they raise the bar for most attacks and provide defense-in-depth. But they complicate the cost-benefit calculation: the safety stack's compute cost is measurable, while its protection is probabilistic and bypassable.
 
 Sources:
 - [When the Statistical Tail Wags the Average Dog](https://medium.com/@johneverettbutton/when-the-statistical-tail-wags-the-average-dog-a-warning-for-ai-risk-managers-part-1-7f0a104140c9)
 - [Proof-of-Guardrail in AI Agents (arXiv)](https://arxiv.org/html/2603.05786)
+- [Adversarial Prompt Evaluation: Systematic Benchmarking of Guardrails (arXiv)](https://arxiv.org/pdf/2502.15427)
 
 ## Safety Layers as a System, Not Independent Taxes
 
@@ -201,6 +222,16 @@ The reviewable artifact catches this. A playbook or PR that shows `"id": row[0],
 
 The reviewable artifact pattern is particularly relevant for infrastructure automation frameworks that expose agent-callable tools. The right architecture is not "agent executes modules directly" but "agent produces a reviewable plan, human or CI approves, system executes." MCP servers are well-suited to this pattern — the server can require that write operations produce a plan artifact for approval rather than executing immediately.
 
+### The LLMOps overhead multiplier
+
+Enterprise data from 2026 puts a concrete number on the total operational overhead: the typical ratio of **total LLMOps cost to raw API spend is 2.3×–4.1×**. This multiplier includes evaluation, safety, prompt maintenance, monitoring, and reliability engineering. Retry logic and fallback routing alone add 5–15% API cost inflation from provider outages, rate limit errors, and timeout retries.
+
+For organizations using LLM-as-judge for safety evaluation specifically, per-evaluation costs run **$0.03–$0.10**, with recommended traffic sampling rates of 1–5%. Multi-model judge panels (3–5 models with majority vote) reduce biases by 30–40% but cost 3–5× more. At 10,000 monthly evaluations, LLM judges save $50,000–$100,000 vs. human review while maintaining 80% agreement with human evaluators.
+
+Evaluation and QA costs including judge LLM token costs run **$3,000–$15,000 per quarter** for enterprise deployments. This is a standing cost regardless of whether the safety stack prevents any incidents.
+
+Source: [The True Cost of Running Enterprise LLMs in Production (2026 Data)](https://theneildave.in/blog/enterprise-llm-cost-2026.html)
+
 ### The cost of having safety: compute
 
 - **AI content moderation market**: $1B (2024) → projected $2.6B (2029).
@@ -302,9 +333,55 @@ No published study compares the safety tax of these approaches head-to-head for 
 
 These comparisons would reframe the question from "how much does safety cost?" to "which safety approach delivers the best return on investment?"
 
+## Drift's Empirical Findings on the Safety Tax
+
+Since this document was first written, drift's experiments have produced several findings directly relevant to the safety tax question:
+
+### Hybrid execution eliminates the safety tax for deterministic fields
+
+Drift's core finding is that many LLM output fields are deterministic — the model copies from input, applies a fixed mapping, or classifies with high confidence. For these fields, drift generates extraction rules (regex, mapping, classifier) that bypass the LLM entirely.
+
+**The safety implication**: fields extracted by deterministic rules bypass not only the productive LLM but also the entire safety stack. A regex extracting `Ticket ID: 1aiu3lrqi` needs no guardrail check, no content moderation, and no safety judge. In the helpdesk triage experiment, 6 of 12 fields were handled by rules — effectively halving the safety tax surface for this task.
+
+The safety-tax reduction is mechanistic, not statistical: rules produce identical output every time, cannot hallucinate, and execute in microseconds. There is nothing for a safety layer to check.
+
+### Pre-digestion shrinks the safety scanning surface
+
+Input pre-digestion (83% token reduction on Ansible logs) reduces what the safety stack must scan. If guardrails run on the pre-digested input rather than the raw input, the guardrail compute cost drops proportionally. For a NeMo Guardrails check that processes ~1,000 tokens of pre-digested input instead of ~6,000 tokens of raw log, the latency and token cost are both lower.
+
+This is more than a performance optimization — it's a safety improvement. Large inputs (100KB+ logs) caused the productive LLM to fail 40% of the time (ignoring instructions, producing rambling narratives). Pre-digestion eliminated these failures entirely. A safety layer evaluating the focused pre-digested output is checking higher-quality content and is less likely to false-reject.
+
+### Model upgrades are safety events
+
+Upgrading from Qwen2.5:32b to Qwen3:30b on identical hardware dropped functional equivalence from **100% to 0%** on the iterative_refactor task. Qwen3 consistently missed a password exposure fix that Qwen2.5 catches every time. This is not drift — it's a model capability regression.
+
+In a system with write access, a model upgrade that silently drops a security fix from 100% to 0% is a safety incident. No guardrail in the standard safety stack detects this: the model's output is well-formed, non-toxic, and structurally valid. It's just functionally wrong.
+
+**The safety implication**: model version pinning is itself a safety control. The standard guardrail stack (content moderation, jailbreak detection, output format validation) evaluates the wrong dimension of safety for production agents. Functional regression testing — running the same task before and after upgrade and comparing outputs — catches what guardrails miss. Drift provides exactly this capability.
+
+### Infrastructure non-determinism compounds safety risk
+
+Drift measures output variability across infrastructure tiers at temperature=0:
+
+| Infrastructure | Exact Match | Functional Eq |
+|---------------|-------------|---------------|
+| Single-GPU self-hosted (Ollama) | 100% | 100% |
+| Shared cloud (DeepInfra) | 90% | 100% |
+| Cloud API (Vertex AI) | 30% | 100% |
+
+For safety evaluation, the 30% exact match on cloud APIs means a safety audit of a sample output may not generalize. If 70% of outputs differ textually, a safety judge that approved one variant may reject another — or vice versa. The safety stack itself is being evaluated on a moving target.
+
+Self-hosted inference removes this variable: the output is the same every time, so safety evaluation of one output covers all future outputs on the same input. The 34% throughput cost of deterministic inference may be cheaper than the compound cost of evaluating non-deterministic outputs.
+
+### Attention analysis reveals limits of keyword-based safety
+
+Drift's attention weight analysis (MLX, 50 tickets) found that classification fields use **diffuse attention** — per-word weights of 0.001–0.010, spread across the entire input. The model doesn't classify by spotting keywords; it synthesizes meaning across the full ticket.
+
+This has a direct safety implication: keyword-based guardrails (blocklists, regex filters) cannot detect harmful classification because the model's reasoning is holistic, not keyword-driven. A guardrail that blocks "DELETE" can prevent a harmful SQL statement, but a guardrail that blocks individual words cannot prevent a harmful classification decision because no single word drives the decision.
+
 ## Gaps in the Research
 
-The following questions do not have published answers as of March 2026:
+The following questions do not have published answers as of April 2026:
 
 1. **Total safety-to-productive compute ratio**: What percentage of GPU-hours in a production agentic deployment is spent on safety vs. productive work? Fragments exist (NeMo adds 0.5s, Llama Guard adds 0.2s, deterministic inference costs 34%) but no end-to-end measurement.
 
@@ -338,17 +415,18 @@ The following questions do not have published answers as of March 2026:
 
 The drift project is positioned to measure several aspects of the safety tax that existing tools do not:
 
-### 1. Quantifying the Reproducibility Cost Curve
+### 1. Quantifying the Reproducibility Cost Curve (partially complete)
 
-Drift already measures output variability across identical runs. By comparing runs across different infrastructure configurations:
-- **Unconstrained cloud inference** (current DeepInfra results: 40% exact match on code generation, 83.3% on structured extraction)
+Drift has measured output variability across three infrastructure tiers:
+- **Self-hosted inference** (Ollama qwen2.5:32b): **100% exact match** at temp=0
+- **Shared cloud inference** (DeepInfra qwen2.5:72b): **90% exact match** on extraction, 40% on code generation
+- **Cloud API** (Vertex AI Claude Sonnet): **30% exact match** on extraction
+
+What remains unmeasured:
 - **Constrained decoding** (SGLang with JSON grammar enforcement)
 - **Deterministic inference** (SGLang with `--enable-deterministic-inference`)
-- **Self-hosted inference** (current Ollama results: 100% exact match)
 
-...drift could produce a cost curve: how much compute does each approach require to achieve a given level of output consistency? This would provide empirical data for gap #6 and #7 above.
-
-This is a reproducibility measurement, not a safety measurement. Drift does not evaluate whether outputs are harmful — it evaluates whether they are consistent. But consistency is a prerequisite for meaningful safety evaluation: if outputs vary unpredictably, safety audits of sample outputs may not generalize.
+The cost curve so far shows that self-hosted single-GPU inference achieves perfect determinism at temp=0 with zero guardrail overhead, while cloud APIs introduce textual drift that is functionally harmless but complicates safety auditing — a sample safety evaluation may not generalize to 70% of outputs that differ textually.
 
 ### 2. The Retry Death Spiral Metric
 
