@@ -461,7 +461,17 @@ P(all pass) = 0.786 × 0.053 × 0.864 = 3.6%
 
 This is the first empirical measurement of the "retry death spiral" described earlier in this document. The theoretical projection (57% rejection → 2.3x retries) understated the problem for software engineering workloads, where the actual rejection rate approaches 95% for code-producing steps. The guard model's category taxonomy is simply misaligned with legitimate software engineering output.
 
-**Methodology**: `scripts/safety_audit.py` loaded 663 LLM outputs from 30 experiments, deduplicated to 224 unique outputs by content prefix, and ran each through Llama Guard 3-1B on Ollama. Full results saved to `results/safety_audit.json`.
+**Category overrides collapse the false positive rate.** Re-running the same audit with S6 and S8 excluded (the two categories that flagged legitimate code review and implementations) dropped the rejection rate from **47.8% to 1.3%** — only 3 outputs flagged, all still false positives (S1 on SQL injection reviews mentioning "attacks", S3 on security analysis mentioning "password exposure"). Pipeline overhead dropped from 614% to 1%. The guard adds ~290ms latency per check regardless.
+
+| Configuration | Rejection rate | Pipeline overhead | Remaining FPs |
+|--------------|---------------|-------------------|---------------|
+| Default (all categories) | 47.8% | 614% (21.4 calls vs 3) | 107/107 |
+| Exclude S6+S8 | 1.3% | 1% (3.04 calls vs 3) | 3/3 |
+| Exclude S1+S3+S6+S8 | 0% (projected) | 0% | 0 |
+
+This demonstrates a practical finding: **the safety tax for software engineering workloads is almost entirely a configuration problem, not a compute problem.** The guard model works correctly — code review is specialized advice, code is intellectual property — but its category taxonomy does not align with the workload. A production deployment that fails to configure category overrides will see 96.4% of pipeline runs blocked. One that configures them correctly sees 1% overhead (latency-only, no retries).
+
+**Methodology**: `scripts/safety_audit.py` loaded 663 LLM outputs from 30 experiments, deduplicated to 224 unique outputs by content prefix, and ran each through Llama Guard 3-1B on Ollama. Full results saved to `results/safety_audit.json` (default) and `results/safety_audit_filtered.json` (S6+S8 excluded).
 
 ### Attention analysis reveals limits of keyword-based safety
 

@@ -33,11 +33,13 @@ class GuardModel:
         self,
         model: str = "llama-guard3:1b",
         base_url: str | None = None,
+        exclude_categories: list[str] | None = None,
     ):
         self.model = model
         self.base_url = (
             base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
         ).rstrip("/")
+        self.exclude_categories = set(exclude_categories or [])
 
     def check(self, content: str, prompt: str = "") -> GuardResult:
         """Check if content is safe according to the guard model.
@@ -100,6 +102,9 @@ class GuardModel:
           "safe"
         or:
           "unsafe\nS1" (with category code)
+
+        If exclude_categories is set, flags in those categories are
+        treated as safe (the guard fired but we don't care).
         """
         lines = response.strip().split("\n")
         verdict = lines[0].strip().lower()
@@ -113,8 +118,9 @@ class GuardModel:
             )
         else:
             category = lines[1].strip() if len(lines) > 1 else None
+            excluded = category in self.exclude_categories if category else False
             return GuardResult(
-                safe=False,
+                safe=excluded,  # treat excluded categories as safe
                 raw_response=response,
                 category=category,
                 latency_ms=round(latency_ms, 1),
