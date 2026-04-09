@@ -310,8 +310,10 @@ The 57.3% rejection rate (42.7% utility) from the LlamaFirewall benchmark is the
 |---------------|--------------------------|----------------------|------------------------|----------------------|
 | 15% | 1.18x | ~$104 | ~$8,123 | ~21 years |
 | 30% | 1.43x | ~$250 | ~$8,269 | ~20 years |
+| 48% (drift audit — Llama Guard 3-1B) | 1.91x | ~$533 | ~$8,552 | ~20 years |
 | 57% (LlamaFirewall) | 2.33x | ~$753 | ~$8,772 | ~20 years |
 | 70% | 3.33x | ~$1,360 | ~$9,379 | ~19 years |
+| 95% (drift audit — code generation steps) | 20.0x | ~$11,083 | ~$19,102 | ~15 years |
 | 80% | 5.00x | ~$2,332 | ~$10,351 | ~18 years |
 
 At 1M calls/month, the rejection rate barely moves the needle — human ops dominates the cost. At 100M calls/month (where human ops is amortized), the picture changes: a 15% rejection rate adds ~$10K/month in retries while 57% adds ~$75K and 80% adds ~$233K. The retry death spiral becomes the dominant cost above ~40% rejection.
@@ -421,6 +423,46 @@ For safety evaluation, the 30% exact match on cloud APIs means a safety audit of
 
 Self-hosted inference removes this variable: the output is the same every time, so safety evaluation of one output covers all future outputs on the same input. The 34% throughput cost of deterministic inference may be cheaper than the compound cost of evaluating non-deterministic outputs.
 
+### Empirical guard false positive rate: 47.8% on legitimate outputs
+
+We ran Llama Guard 3-1B against **224 unique LLM outputs** from drift's results corpus — spanning code review, data extraction, incident triage, config generation, and iterative refactoring tasks. Every output was a legitimate, correct response to a software engineering prompt. None contained harmful content.
+
+**Results**: 107 of 224 outputs (47.8%) were classified as unsafe. All 107 are false positives.
+
+| Category | Count | Description | Trigger |
+|----------|-------|-------------|---------|
+| S6 | 73 (68%) | Specialized Advice | Code review findings, security recommendations |
+| S8 | 31 (29%) | Intellectual Property | Code implementations, Kubernetes manifests |
+| S1 | 2 (2%) | Violent Crimes | SQL injection review mentioning "attacks" |
+| S3 | 1 (1%) | Sex-Related Crimes | Security analysis mentioning "password exposure" |
+
+The S1 and S3 flags are absurd — the guard model confused security terminology ("SQL injection attacks", "password stored in plaintext") with actual harmful content. But the S6 and S8 flags are more concerning because they are systematic: any code review output triggers "specialized advice" and any code implementation triggers "intellectual property." These categories make Llama Guard fundamentally unsuitable for software engineering workflows without category-level overrides.
+
+**Per-step rejection rates reveal the structural problem:**
+
+| Pipeline Step | Rejection Rate | Why |
+|---------------|---------------|-----|
+| implementer (code generation) | 95% (72/76) | Code = "intellectual property" or "specialized advice" |
+| baseline (single-step tasks) | 82% (9/11) | Extraction/triage outputs trigger S6 |
+| hybrid (rule + LLM) | 80% (4/5) | Same content, same flags |
+| initial_analysis (refactoring) | 25% (2/8) | Security analysis occasionally triggers S3/S6 |
+| reviewer (code review) | 21% (9/42) | Review text less likely to trigger |
+| verifier (pass/fail) | 14% (11/81) | Short verdicts mostly safe |
+
+**The compound pipeline rejection rate is catastrophic.** In a 3-step code review pipeline (reviewer → implementer → verifier), the probability that all three steps pass guard checks is:
+
+```
+P(all pass) = 0.786 × 0.053 × 0.864 = 3.6%
+```
+
+**96.4% of pipeline runs would be blocked** by at least one false positive. With per-step retry (retry only the failed step), the expected call count is 21.4 calls vs. 3 without guard — a **614% overhead**. With full-pipeline retry (restart from scratch on any failure), 28 attempts are needed per clean run.
+
+**Guard latency**: mean 290ms, median 268ms, P95 449ms. For a 3-step pipeline, guard checks alone add 0.9s. With retries (21.4 expected calls), guard overhead reaches 6.2s — potentially exceeding the productive inference time.
+
+This is the first empirical measurement of the "retry death spiral" described earlier in this document. The theoretical projection (57% rejection → 2.3x retries) understated the problem for software engineering workloads, where the actual rejection rate approaches 95% for code-producing steps. The guard model's category taxonomy is simply misaligned with legitimate software engineering output.
+
+**Methodology**: `scripts/safety_audit.py` loaded 663 LLM outputs from 30 experiments, deduplicated to 224 unique outputs by content prefix, and ran each through Llama Guard 3-1B on Ollama. Full results saved to `results/safety_audit.json`.
+
 ### Attention analysis reveals limits of keyword-based safety
 
 Drift's attention weight analysis (MLX, 50 tickets) found that classification fields use **diffuse attention** — per-word weights of 0.001–0.010, spread across the entire input. The model doesn't classify by spotting keywords; it synthesizes meaning across the full ticket.
@@ -435,7 +477,7 @@ The following questions do not have published answers as of April 2026:
 
 2. **Safety utility loss in practice**: LlamaFirewall's 42.7% utility rate was measured in a specific benchmark. What is the utility loss in real production deployments? What is the cost of re-generation when outputs are rejected? How do false rejection rates vary by domain?
 
-3. **The retry death spiral**: If safety layers reject 57% of outputs, and each retry has a probability of also being rejected, how many retries are needed per useful output? At what rejection rate does the system become uneconomical? This is a multiplicative cost that can turn a "10% latency tax" into a "200%+ effective overhead" problem in agentic workflows.
+3. **The retry death spiral** (partially answered): If safety layers reject 57% of outputs, and each retry has a probability of also being rejected, how many retries are needed per useful output? At what rejection rate does the system become uneconomical? This is a multiplicative cost that can turn a "10% latency tax" into a "200%+ effective overhead" problem in agentic workflows. **Drift's empirical audit found the answer is worse than projected**: Llama Guard 3-1B rejects 95% of code-generating outputs and 47.8% of all software engineering outputs. A 3-step pipeline has a 96.4% chance of at least one step being blocked, requiring 21.4 expected calls (614% overhead) with per-step retry. The remaining gap is measuring this with guardrails that support category-level overrides (disabling S6/S8 for code workloads).
 
 4. **Diminishing returns on stacked guardrails**: NeMo shows diminishing latency per additional layer, but does detection quality improve proportionally? Is the marginal value of the 4th or 5th guardrail worth its compute? And do stacked layers interact negatively — increasing false rejections through compound probability?
 
@@ -476,7 +518,9 @@ What remains unmeasured:
 
 The cost curve so far shows that self-hosted single-GPU inference achieves perfect determinism at temp=0 with zero guardrail overhead, while cloud APIs introduce textual drift that is functionally harmless but complicates safety auditing — a sample safety evaluation may not generalize to 70% of outputs that differ textually.
 
-### 2. The Retry Death Spiral Metric
+### 2. The Retry Death Spiral Metric (baseline established)
+
+Drift's safety audit (April 2026) established the baseline: Llama Guard 3-1B produces a 47.8% false positive rate on software engineering outputs, with 95% rejection on code generation steps. The compound pipeline rejection rate (96.4% for a 3-step pipeline) confirms the death spiral is real and severe. The next step is live measurement with guard checks in the pipeline loop, measuring actual retry dynamics (do retries produce different enough output to pass, or does the same prompt consistently trigger the same rejection?).
 
 For a given safety configuration, drift can measure:
 - The percentage of productive inferences rejected by safety layers.

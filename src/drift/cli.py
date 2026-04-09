@@ -22,7 +22,50 @@ from drift.tasks import resolve_task_prompts
 from drift.analysis import analyze_metrics, format_report
 
 
-async def _run_baseline(config: dict, num_runs: int, output_dir: str) -> Path:
+def _guard_check(guard, content: str, label: str) -> dict | None:
+    """Run a safety guard check, print result, return metadata."""
+    if not guard or not content:
+        return None
+    try:
+        result = guard.check(content)
+        verdict = "SAFE" if result.safe else f"UNSAFE ({result.category})"
+        click.echo(f"      guard: {verdict} ({result.latency_ms:.0f}ms)")
+        return result.to_dict()
+    except Exception as e:
+        click.echo(f"      guard: ERROR ({e})")
+        return {"safe": None, "category": None, "latency_ms": None, "error": str(e)}
+
+
+def _guard_summary(all_checks: list[dict]):
+    """Print guard summary statistics at end of experiment."""
+    if not all_checks:
+        return
+    flat = []
+    for c in all_checks:
+        if "step_checks" in c:
+            flat.extend(c["step_checks"])
+        else:
+            flat.append(c)
+
+    total = len(flat)
+    safe = sum(1 for c in flat if c.get("safe") is True)
+    unsafe = sum(1 for c in flat if c.get("safe") is False)
+    errors = total - safe - unsafe
+
+    click.echo(f"\nGuard summary: {safe}/{total} safe, {unsafe} rejected"
+               + (f", {errors} errors" if errors else ""))
+    if unsafe:
+        rej = unsafe / (total - errors) if (total - errors) else 0
+        click.echo(f"  Rejection rate: {rej:.1%}")
+        click.echo(f"  Expected retries per useful output: {1/(1-rej):.2f}x" if rej < 1 else "")
+
+        from collections import Counter
+        cats = Counter(c.get("category") for c in flat if c.get("safe") is False)
+        for cat, count in cats.most_common():
+            click.echo(f"  {cat}: {count}")
+
+
+async def _run_baseline(config: dict, num_runs: int, output_dir: str, guard=None) -> Path:
     """Run a single-call experiment num_runs times."""
     exp = config["experiment"]
     provider = make_provider(exp)
@@ -39,23 +82,29 @@ async def _run_baseline(config: dict, num_runs: int, output_dir: str) -> Path:
     click.echo(f"Output: {run_dir}")
     click.echo()
 
+    guard_checks = []
     for i in range(num_runs):
         click.echo(f"  Run {i + 1}/{num_runs}...", nl=False)
         response = await provider.complete(system, prompt, temperature=exp.get("temperature", 0))
+        click.echo(f" {response.total_ms:.0f}ms")
         result = {
             "run_index": i,
             "type": "baseline",
             "response": response.to_dict(),
             "config": exp,
         }
+        gc = _guard_check(guard, response.content, f"run {i}")
+        if gc:
+            result["guard"] = gc
+            guard_checks.append(gc)
         save_run(run_dir, i, result)
-        click.echo(f" {response.total_ms:.0f}ms")
 
+    _guard_summary(guard_checks)
     click.echo(f"\nDone. Results saved to {run_dir}")
     return run_dir
 
 
-async def _run_pipeline(config: dict, num_runs: int, output_dir: str) -> Path:
+async def _run_pipeline(config: dict, num_runs: int, output_dir: str, guard=None) -> Path:
     """Run a multi-step pipeline experiment num_runs times."""
     exp = config["experiment"]
     steps = exp["steps"]
@@ -76,23 +125,51 @@ async def _run_pipeline(config: dict, num_runs: int, output_dir: str) -> Path:
     click.echo(f"Output: {run_dir}")
     click.echo()
 
+    guard_checks = []
     for i in range(num_runs):
         click.echo(f"  Run {i + 1}/{num_runs}:")
         task_dir = (Path.cwd() / "tasks" / exp["task"]) if "task" in exp else None
         step_results = await run_pipeline(steps, initial_input, task_dir=task_dir)
+        serialized = _serialize_results(step_results)
+
+        # Run guard checks on each step output
+        run_guard = {"step_checks": []}
+        if guard:
+            for step_data in serialized:
+                if step_data.get("type") == "loop":
+                    for iteration in step_data.get("iterations", []):
+                        for s in iteration:
+                            gc = _guard_check(guard, s.get("response", {}).get("content", ""),
+                                              f"{s['name']}")
+                            if gc:
+                                gc["step"] = s["name"]
+                                run_guard["step_checks"].append(gc)
+                else:
+                    gc = _guard_check(guard, step_data.get("response", {}).get("content", ""),
+                                      f"{step_data['name']}")
+                    if gc:
+                        gc["step"] = step_data["name"]
+                        run_guard["step_checks"].append(gc)
+
+            run_guard["all_safe"] = all(c.get("safe") for c in run_guard["step_checks"])
+            guard_checks.append(run_guard)
+
         result = {
             "run_index": i,
             "type": "pipeline",
-            "steps": _serialize_results(step_results),
+            "steps": serialized,
             "config": exp,
         }
+        if run_guard["step_checks"]:
+            result["guard"] = run_guard
         save_run(run_dir, i, result)
 
+    _guard_summary(guard_checks)
     click.echo(f"\nDone. Results saved to {run_dir}")
     return run_dir
 
 
-async def _run_hybrid(config: dict, num_runs: int, output_dir: str) -> Path:
+async def _run_hybrid(config: dict, num_runs: int, output_dir: str, guard=None) -> Path:
     """Run a hybrid (rules + LLM) experiment num_runs times."""
     from drift.hybrid.executor import run_hybrid, build_hybrid_prompt
 
@@ -115,6 +192,7 @@ async def _run_hybrid(config: dict, num_runs: int, output_dir: str) -> Path:
     click.echo(f"Output: {run_dir}")
     click.echo()
 
+    guard_checks = []
     for i in range(num_runs):
         click.echo(f"  Run {i + 1}/{num_runs}...", nl=False)
         output_mode = spec.get("output_mode", "merge")
@@ -133,6 +211,8 @@ async def _run_hybrid(config: dict, num_runs: int, output_dir: str) -> Path:
             content = hybrid_result.raw_llm_response
         else:
             content = json.dumps(hybrid_result.merged, indent=2)
+        ms = f" {resp.total_ms:.0f}ms" if resp else ""
+        click.echo(f" rules={hybrid_result.rules_matched}/{hybrid_result.rules_applied}{ms}")
         result = {
             "run_index": i,
             "type": "hybrid",
@@ -151,10 +231,13 @@ async def _run_hybrid(config: dict, num_runs: int, output_dir: str) -> Path:
             },
             "config": exp,
         }
+        gc = _guard_check(guard, content, f"run {i}")
+        if gc:
+            result["guard"] = gc
+            guard_checks.append(gc)
         save_run(run_dir, i, result)
-        ms = f" {resp.total_ms:.0f}ms" if resp else ""
-        click.echo(f" rules={hybrid_result.rules_matched}/{hybrid_result.rules_applied}{ms}")
 
+    _guard_summary(guard_checks)
     click.echo(f"\nDone. Results saved to {run_dir}")
     return run_dir
 
@@ -169,17 +252,29 @@ def cli():
 @click.argument("config_path", type=click.Path(exists=True))
 @click.option("--runs", default=30, help="Number of identical runs.")
 @click.option("--output-dir", default="results", help="Output directory.")
-def run(config_path: str, runs: int, output_dir: str):
+@click.option("--safety-guard", default=None,
+              help="Guard model for safety checking (e.g. llama-guard3:1b).")
+@click.option("--guard-base-url", default=None,
+              help="Ollama base URL for guard model.")
+def run(config_path: str, runs: int, output_dir: str,
+        safety_guard: str | None, guard_base_url: str | None):
     """Run an experiment from a YAML config."""
     config = yaml.safe_load(Path(config_path).read_text())
     config = resolve_task_prompts(config, Path.cwd() / "tasks")
+
+    guard = None
+    if safety_guard:
+        from drift.safety.guard import GuardModel
+        guard = GuardModel(model=safety_guard, base_url=guard_base_url)
+        click.echo(f"Safety guard: {safety_guard}")
+
     exp_type = config["experiment"].get("type", "baseline")
     if exp_type == "pipeline":
-        asyncio.run(_run_pipeline(config, runs, output_dir))
+        asyncio.run(_run_pipeline(config, runs, output_dir, guard=guard))
     elif exp_type == "hybrid":
-        asyncio.run(_run_hybrid(config, runs, output_dir))
+        asyncio.run(_run_hybrid(config, runs, output_dir, guard=guard))
     else:
-        asyncio.run(_run_baseline(config, runs, output_dir))
+        asyncio.run(_run_baseline(config, runs, output_dir, guard=guard))
 
 
 @cli.command()
