@@ -232,11 +232,41 @@ Evaluation and QA costs including judge LLM token costs run **$3,000–$15,000 p
 
 Source: [The True Cost of Running Enterprise LLMs in Production (2026 Data)](https://theneildave.in/blog/enterprise-llm-cost-2026.html)
 
+### Cloud guardrail pricing
+
+AWS Bedrock Guardrails provides concrete per-request pricing (post-December 2024 85% price reduction):
+
+- **$0.15 per 1,000 text units** for content filters
+- **$0.15 per 1,000 text units** for denied topics
+- Sensitive information filters: no additional charge
+- A text unit = up to 1,000 characters
+
+Example: 1,000 queries/hour with average 200-char input + 1,500-char output = **$0.90/hour** for content filters + denied topics. AWS describes "small additional latency overhead," with practitioners alerting at ~500ms thresholds.
+
+Notably, Bedrock supports an **async streaming mode** with zero latency impact — content is checked in the background, but unsafe chunks may reach the user before the scan completes. This is an explicit latency-vs-safety tradeoff that illustrates the tension.
+
+Source: [Amazon Bedrock Guardrails reduces pricing by up to 85%](https://aws.amazon.com/about-aws/whats-new/2024/12/amazon-bedrock-guardrails-reduces-pricing-85-percent/)
+
+### KV cache overhead from safety system prompts
+
+Safety system prompts (alignment instructions, content policies, guardrail triggers) are typically the most static part of the prompt — and the most wasteful without caching. A 20,000-token system prompt running over 50 turns produces **1 million tokens of redundant computation**. For Llama 3.1-70B, a single 128K context prompt consumes **~40GB of HBM** just for KV cache.
+
+**Prompt caching largely solves this**: latency reduced by up to **80%**, input token costs reduced by up to **90%** (Anthropic charges cache hits at ~90% less than misses). NVIDIA TensorRT-LLM's early KV cache reuse shares system prompt KV cache across concurrent users, accelerating inference by up to **5x** for system-prompt-heavy workloads.
+
+However, KV cache sharing introduces a privacy tension. PROMPTPEEK attacks demonstrate cross-tenant prompt leakage via shared KV caches. Disabling sharing costs **8–38.9% TTFT overhead**. SafeKV (NDSS 2025) selectively isolates sensitive cache entries while reusing non-sensitive ones.
+
+The safety-specific implication: the KV cache cost of safety system prompts is a solved problem for organizations using prompt caching, but remains a real cost for those who don't — and caching introduces its own security risks.
+
+Sources:
+- [ngrok — Prompt Caching](https://ngrok.com/blog/prompt-caching)
+- [NVIDIA — 5x Faster TTFT with KV Cache Early Reuse](https://developer.nvidia.com/blog/5x-faster-time-to-first-token-with-nvidia-tensorrt-llm-kv-cache-early-reuse/)
+- [SafeKV (OpenReview)](https://openreview.net/pdf?id=jhDsbd5eXL)
+
 ### The cost of having safety: compute
 
 - **AI content moderation market**: $1B (2024) → projected $2.6B (2029).
 - **Per-request overhead**: ~0.5s (NeMo) + ~0.2s (Llama Guard) per productive call, assuming parallel execution.
-- **Throughput cost**: 34% for deterministic inference (reproducibility), 5–60% for constrained decoding (safety + reproducibility).
+- **Throughput cost**: 34% for deterministic inference (reproducibility), near-zero to 60% for constrained decoding (safety + reproducibility).
 - **Utility loss**: up to 57.3% of legitimate outputs rejected (LlamaFirewall combined layers).
 
 ### The cost of having safety: human operations
@@ -319,9 +349,27 @@ PII scrubbing, prompt reformatting, and input normalization can be done with tra
 
 For code generation tasks, running LLM-generated code in sandboxed environments (containers, WASM, Firebase emulators) verifies safety through behavior rather than content classification. A sandbox that catches a `DROP TABLE` statement is more reliable than an LLM judge that might miss it. The cost profile is different: sandbox execution time vs. LLM inference time. For code-specific tasks, this may be both cheaper and more effective than an LLM safety judge.
 
+### Decoding-time safety
+
+A paradigm shift is emerging: embedding safety checks directly in the decoding loop rather than running separate post-hoc models. This partially dissolves the "safety tax" concept:
+
+- **Kelp** (ACL 2025): a 20M-parameter probe attached to a frozen LM performs streaming token-level risk detection during generation, adding **less than 0.5ms per-token latency** while outperforming post-hoc guardrails by **15.61% higher average F1**.
+- **Speculative Safety-Aware Decoding (SSD)** (arXiv:2508.17739): uses a small safety-aligned model as the draft model in speculative sampling, dynamically switching decoding schemes based on jailbreak risk. Key result: **accelerates inference while adding safety** rather than the usual tradeoff.
+- **ShieldHead** (ACL 2025): lightweight classification head parallelized with the LM head for token-level safety prediction during decoding, avoiding the latency of a separate safety model call entirely.
+
+These approaches represent a shift from "safety adds overhead" to "safety can be embedded in the decoding loop at sub-millisecond cost." They are not yet production-standard but signal where the field is heading.
+
+Sources:
+- [Kelp (ACL 2025 Findings)](https://aclanthology.org/2025.findings-acl.1223.pdf)
+- [Speculative Safety-Aware Decoding (arXiv)](https://arxiv.org/abs/2508.17739)
+
 ### Intrinsic safety via fine-tuning
 
 Models can be fine-tuned (via RLHF, DPO, or constitutional AI methods) to refuse harmful requests internally, reducing the need for external guardrails. The cost is borne during training rather than at inference time. The tradeoff is that intrinsic safety is harder to audit, update, and customize per-deployment compared to external guardrails. It also contributes to the utility loss problem: an overly-aligned model may refuse legitimate requests.
+
+**The training-time safety tax is now formalized.** Huang et al. (Georgia Tech, March 2025) demonstrated that safety alignment of Large Reasoning Models degrades reasoning capability: "You can't get a safety-aligned model and good reasoning model at the same time." This means intrinsic safety doesn't eliminate the cost — it moves it from inference-time compute to training-time capability degradation. Follow-up work explores mitigations: LoRA-based alignment (smaller weight perturbation), ThinkSafe (self-generated safety reasoning), and DGR (avoiding out-of-distribution distilled data).
+
+Source: [Safety Tax: Safety Alignment Makes Your Large Reasoning Models Less Reasonable (arXiv:2503.00555)](https://arxiv.org/abs/2503.00555)
 
 ### The comparison gap
 
