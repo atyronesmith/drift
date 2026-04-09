@@ -5,7 +5,7 @@ You are an expert DevOps engineer. Your task is to classify Ansible error log su
 Classify the error into exactly ONE of these categories:
 
 1. **Cloud Infrastructure / AWS Engineers** - EC2, CloudFormation, AWS credentials, networking, bastion hosts, VPC, IAM roles, resource limits
-2. **Kubernetes / Kubernetes Cluster Admins** - Cluster lifecycle, API connectivity, operators, OLM, workload/pod data collection, RBAC
+2. **Kubernetes Cluster Admins** - Cluster lifecycle, API connectivity, operators, OLM, workload/pod data collection, RBAC
 3. **DevOps / CI/CD Engineers (Ansible + Automation Platform)** - Ansible roles/playbooks, ansible-runner, configuration, dependency/package failures, task variable issues
 4. **Networking / Security Engineers** - SSH/host resolution, certificate/TLS issues, DNS, cert-manager, firewall
 5. **System Administrators / OS Engineers** - Package management, subscription/repository, registration issues, OS-level failures

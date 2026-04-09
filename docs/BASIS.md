@@ -14,7 +14,7 @@ This is not a perception problem. It is a physics problem.
 
 ## 2. Prior Work: Model-Level Variance in Multi-Agent Financial Risk Assessment
 
-This project is directly motivated by empirical results from a DTCC/FINOS financial services hackathon (2025), where Team Stochastic Blade Runners (Citi, Capital One, the vendor, Summit58, FINOS) built a multi-agent system for AI governance — evaluating the risk posture of new AI software deployments against regulatory frameworks (SR 11-7, EU AI Act, OWASP, NIST, FFIEC).
+This project is directly motivated by empirical results from a DTCC/FINOS financial services hackathon (2025), where a cross-company team built a multi-agent system for AI governance — evaluating the risk posture of new AI software deployments against regulatory frameworks (SR 11-7, EU AI Act, OWASP, NIST, FFIEC).
 
 ### The System
 
@@ -118,7 +118,7 @@ Prefix cache miss is a separate routing problem: a request lands on a pod with n
 
 This matters especially for agentic workflows where the same system prompt and conversation history is re-submitted with every step. Without prefix caching, the serving layer re-processes the entire prefix from scratch on every request. With it, KV blocks for the shared prefix are computed once and reused.
 
-Benchmarks from the vendor Developer (llm-d, October 2025): cache-aware scheduling achieved 87% hit rate vs. 30-40% with cache-blind round-robin routing, and 88% reduction in TTFT for warm hits vs. cold recompute. Cache-blind load balancers scatter requests randomly — cold prefill every time.
+Benchmarks from the llm-d project (October 2025): cache-aware scheduling achieved 87% hit rate vs. 30-40% with cache-blind round-robin routing, and 88% reduction in TTFT for warm hits vs. cold recompute. Cache-blind load balancers scatter requests randomly — cold prefill every time.
 
 ### 3.3 Continuous Batching Tax (Scheduler Layer)
 
@@ -343,12 +343,12 @@ This experiment measures how much that matters in practice.
 
 ## References
 
-- Team Stochastic Blade Runners (Citi, Capital One, the vendor, Summit58, FINOS). "Agentic Workflow Guardrails: Embedding Deterministic Governance into Stochastic AI/Agentic Systems." DTCC/FINOS Financial Services Hackathon (2025).
+- "Agentic Workflow Guardrails: Embedding Deterministic Governance into Stochastic AI/Agentic Systems." DTCC/FINOS Financial Services Hackathon (2025).
 - Nar, F.E., Shaw, R. et al. "The Busy Mom Syndrome: Why your AI reasons better on Sunday morning than Tuesday afternoon."
 - Chen, L., Zaharia, M., Zou, J. "How Is ChatGPT's Behavior Changing over Time?" arXiv:2307.09009 (2023).
 - arXiv:2511.04686 — Coherence failure under KV cache eviction pressure in multi-turn conversations (2025).
 - arXiv:2510.13334 — LongBench task accuracy degradation under cache availability reduction (2025).
 - vLLM GitHub issues #27433 (batch composition variance), #20469 (queue collapse benchmarks).
-- the vendor Developer — llm-d KV cache-aware routing benchmarks (October 2025).
+- llm-d — KV cache-aware routing benchmarks (October 2025).
 - OpenAI GPT-5 System Card — quota-triggered model routing.
 - Microsoft Azure AI Foundry — model router quality-band documentation.
