@@ -14,9 +14,11 @@ Drift is a measurement and optimization framework for LLM output variance. It pr
 - **Hybrid framework**: `src/drift/hybrid/` — rules, executor, compiler, autogen
 - **Probing**: `src/drift/probing/` — logprob entropy analysis, attention weights
 - **Pipeline**: `src/drift/pipeline/` — multi-step pipeline execution
+- **Safety**: `src/drift/safety/` — guard model wrapper, security model evaluation
 - **Tasks**: `tasks/<name>/` — each task has `input.md`, prompt files, and `functional_tests.py`
 - **Experiments**: `experiments/*.yaml` — experiment configurations
-- **Scripts**: `scripts/` — one-off experiment scripts (not part of the package)
+- **Security models**: `security_models/*.yaml` — security architecture definitions for overhead projection
+- **Scripts**: `scripts/` — safety audit and one-off experiment scripts
 - **Tests**: `tests/` — pytest test suite
 
 ## Development Setup
@@ -61,6 +63,7 @@ The main commands (run `drift --help` for full list):
 | `drift refine <engine.py> --input-dir <dir>` | Iterative refinement loop |
 | `drift distill <config.yaml> --input-dir <dir>` | Train classifiers from LLM labels |
 | `drift probe-pipeline <config.yaml>` | Per-step pipeline probing |
+| `drift safety-overhead [--pipeline config.yaml]` | Compare guard overhead across security models |
 | `drift serve <model>` | Start MLX inference server |
 
 ## Adding a New Provider
@@ -91,6 +94,14 @@ Rules in `src/drift/hybrid/rules.py`:
 | `classifier` | Logistic regression with confidence gating |
 | `mapping` | Value lookup table |
 | `conditional` | Conditional logic based on other fields |
+
+## Safety Module
+
+- **Guard model** (`src/drift/safety/guard.py`): Wraps Llama Guard on Ollama via curl subprocess. Supports `exclude_categories` to filter false positives (e.g., S6/S8 for code workloads).
+- **Security models** (`src/drift/safety/models.py`): Loads YAML security model definitions, projects guard overhead for pipeline shapes. Used by `drift safety-overhead`.
+- **Batch audit** (`scripts/safety_audit.py`): Runs guard checks on all saved results. Outputs per-experiment rejection rates, category breakdown, latency stats, and retry death spiral projections.
+- **Live guard** (`drift run --safety-guard`): Per-step guard checking during experiment runs. Results saved in run JSON under `"guard"` key.
+- **Security model YAML format**: See `security_models/` for examples. Checkpoints: `step_input`, `step_output`, `code_output`, `tool_call`, `tool_response`, `inter_agent`, `audit`.
 
 ## Common Pitfalls
 

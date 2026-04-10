@@ -47,6 +47,37 @@ All providers make HTTP calls via `subprocess` + `curl` rather than Python HTTP 
 3. Measure: `drift measure results/my-experiment/<timestamp>/`
 4. Document results in `docs/RESULTS.md`
 
+## Adding Security Models
+
+Security models define the guard checkpoints for a particular security architecture. They live in `security_models/` as YAML files:
+
+```yaml
+name: My Security Model
+version: "2026"
+description: Description of the model
+source: https://example.com/docs
+
+checkpoints:
+  step_input:
+    - {name: content_filter, latency_ms: 290, type: llm, description: "Input safety"}
+  step_output:
+    - {name: content_filter, latency_ms: 290, type: llm, description: "Output safety"}
+  code_output:
+    - {name: code_shield, latency_ms: 50, type: static_analysis}
+  tool_call:
+    - {name: param_validation, latency_ms: 1, type: deterministic}
+  tool_response:
+    - {name: content_filter, latency_ms: 290, type: llm}
+  inter_agent:
+    - {name: identity_check, latency_ms: 1, type: crypto}
+  audit:
+    - {name: audit_log, latency_ms: 2, type: deterministic}
+```
+
+Checkpoint types: `step_input`, `step_output`, `code_output`, `tool_call`, `tool_response`, `inter_agent`, `audit`. Guard types: `llm`, `classifier`, `deterministic`, `crypto`, `static_analysis`.
+
+Test with: `drift safety-overhead -m my_model --steps 3 --code-steps 1`
+
 ## Adding Tasks
 
 Each task needs:

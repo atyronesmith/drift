@@ -106,6 +106,31 @@ experiment:
     Review this Python function...
 ```
 
+### Safety overhead analysis
+
+Drift measures the cost of AI safety infrastructure — guard models, content filters, and guardrail frameworks — on real workloads:
+
+```bash
+# Audit existing results against a guard model
+python scripts/safety_audit.py --model llama-guard3:1b --exclude-categories S6,S8
+
+# Run experiments with live safety guard checking
+drift run experiments/pipeline-structured.yaml --runs 10 \
+    --safety-guard llama-guard3:1b --exclude-categories S6,S8
+
+# Compare overhead across security architectures
+drift safety-overhead --pipeline experiments/pipeline-structured.yaml
+drift safety-overhead --steps 3 --code-steps 1 --tool-calls 1 --iterations 5
+```
+
+Ships with 4 security model definitions (`security_models/`):
+- **Drift Baseline** — 1 output check per step
+- **Meta LlamaFirewall** — PromptGuard + AlignmentCheck + CodeShield
+- **Microsoft Azure Foundry** — 4 intervention points + governance toolkit
+- **FINOS Regulated FSI** — 36 controls, 7 trust boundaries (SOX/SR 11-7)
+
+Key finding: Llama Guard 3-1B produces a 47.8% false positive rate on legitimate software engineering outputs (95% on code generation). Category overrides (excluding S6/S8) drop this to 1.3%. Production security architectures require 15-290 guard checks per pipeline run vs. the 3 we measured. See [docs/ai-safety-overhead.md](docs/ai-safety-overhead.md).
+
 ### Metrics output
 
 `drift measure` outputs JSON with:
@@ -138,6 +163,9 @@ src/drift/
 │   ├── rules.py        # Rule execution (regex, conditional, mapping)
 │   ├── executor.py     # Hybrid orchestration (rules + LLM)
 │   └── compiler.py     # Compile rules to standalone Python engine
+├── safety/
+│   ├── guard.py        # Guard model wrapper (Llama Guard on Ollama)
+│   └── models.py       # Security model definitions and overhead projection
 ├── server/
 │   └── mlx_server.py   # HTTP server for remote MLX inference
 ├── metrics/
@@ -145,6 +173,10 @@ src/drift/
 ├── pipeline/           # Multi-step pipeline execution
 ├── runner/             # N-run orchestration
 └── analysis/           # Statistical analysis and recommendations
+
+security_models/            # Security architecture definitions (YAML)
+scripts/
+└── safety_audit.py     # Batch safety audit of saved results
 ```
 
 ## Dependencies
@@ -158,8 +190,10 @@ Classifiers (optional): scikit-learn.
 - [Technical paper](docs/PAPER.md) — full findings across 17 experiments
 - [Experiment results](docs/RESULTS.md) — detailed per-experiment data
 - [Hybrid framework](docs/HYBRID.md) — automated rule extraction pipeline
+- [AI safety overhead](docs/ai-safety-overhead.md) — safety tax measurement, guard false positives, security model comparison
 - [MLX provider](docs/MLX.md) — Apple Silicon inference and attention probing
 - [Theory](docs/THEORY.md) — voting vs deliberation, distillation thresholds
+- [Management proposal](docs/PROPOSAL.md) — dollar-cost analysis for decision makers
 
 ## Contributing
 
