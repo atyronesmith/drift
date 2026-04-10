@@ -1,0 +1,10 @@
+experiment:
+  name: hybrid-metric-summary
+  model: qwen2.5:32b
+  temperature: 0
+  task: metric_summary
+  type: hybrid
+
+  system_prompt_file: summary_system.md
+  user_prompt_file: summary_user.md
+  hybrid_spec_file: hybrid_auto.yaml

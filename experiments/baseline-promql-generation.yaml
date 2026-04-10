@@ -1,0 +1,8 @@
+experiment:
+  name: baseline-promql-generation
+  model: qwen2.5:32b
+  temperature: 0
+  task: promql_generation
+
+  system_prompt_file: promql_system.md
+  user_prompt_file: promql_user.md
