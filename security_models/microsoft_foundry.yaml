@@ -1,0 +1,61 @@
+name: Microsoft Azure Foundry
+version: "2026"
+description: >
+  Azure AI Content Safety with 4 intervention points per agent step
+  (input, tool_call, tool_response, output). Includes Agent Governance
+  Toolkit for inter-agent trust, MCP security gateway, and deterministic
+  policy enforcement (<0.1ms).
+source: https://learn.microsoft.com/en-us/azure/foundry/guardrails/guardrails-overview
+
+checkpoints:
+  step_input:
+    - name: content_filter
+      latency_ms: 290
+      type: llm
+      description: Azure AI Content Safety (violence, hate, sexual, self-harm)
+    - name: prompt_shield
+      latency_ms: 19
+      type: classifier
+      description: Jailbreak and prompt injection detection
+
+  step_output:
+    - name: content_filter
+      latency_ms: 290
+      type: llm
+      description: Output content safety classification
+    - name: groundedness_check
+      latency_ms: 200
+      type: llm
+      description: Hallucination and groundedness detection
+
+  code_output:
+    - name: code_shield
+      latency_ms: 50
+      type: static_analysis
+      description: Static analysis of generated code
+
+  tool_call:
+    - name: parameter_validation
+      latency_ms: 1
+      type: deterministic
+      description: MCP security gateway schema validation
+    - name: jit_permissions
+      latency_ms: 1
+      type: deterministic
+      description: Just-in-time permission scoping
+
+  tool_response:
+    - name: content_filter
+      latency_ms: 290
+      type: llm
+      description: Tool response content safety check
+
+  inter_agent:
+    - name: identity_verification
+      latency_ms: 1
+      type: crypto
+      description: Ed25519/SPIFFE identity + behavioral trust scoring
+    - name: policy_enforcement
+      latency_ms: 0.1
+      type: deterministic
+      description: Deterministic policy engine (<0.1ms per action)

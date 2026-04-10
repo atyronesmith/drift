@@ -1,0 +1,13 @@
+name: Drift Baseline
+version: "2026"
+description: >
+  Minimal safety configuration — single output guard check per step.
+  What drift's safety audit measured empirically.
+source: docs/ai-safety-overhead.md
+
+checkpoints:
+  step_output:
+    - name: content_filter
+      latency_ms: 290
+      type: llm
+      description: Llama Guard 3-1B output classification

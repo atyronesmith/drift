@@ -1,0 +1,109 @@
+name: FINOS Multi-Agent (Regulated FSI)
+version: "2026-04"
+description: >
+  FINOS AI Reference Architecture for multi-agent systems in regulated
+  financial services. 36 controls across 9 layers, 7 trust boundaries.
+  Includes FSI-specific requirements: immutable audit trails (SOX/SR 11-7),
+  MNPI leakage prevention, cryptographic decision binding, mandatory
+  human sign-off for high-risk operations.
+source: https://github.com/finos-labs/ai-reference-architecture-library/tree/main/Library/reference-architecture/multi-agent
+
+checkpoints:
+  step_input:
+    - name: input_sanitization
+      latency_ms: 5
+      type: deterministic
+      description: "C1: Input validation and sanitization"
+    - name: ai_gateway_filter
+      latency_ms: 290
+      type: llm
+      description: "C2: AI gateway content filtering"
+    - name: prompt_shield
+      latency_ms: 19
+      type: classifier
+      description: Jailbreak/injection detection at gateway
+    - name: policy_validation
+      latency_ms: 0.1
+      type: deterministic
+      description: "C13: Policy-as-code enforcement (ABAC)"
+
+  step_output:
+    - name: output_sanitization
+      latency_ms: 5
+      type: deterministic
+      description: "C23: Output sanitization (PII, secrets)"
+    - name: content_filter
+      latency_ms: 290
+      type: llm
+      description: Content safety classification
+    - name: dlp_scan
+      latency_ms: 50
+      type: classifier
+      description: "C19: DLP scanning for MNPI and sensitive data"
+    - name: non_bypassable_workflow
+      latency_ms: 0.1
+      type: deterministic
+      description: "C26: Non-bypassable approval workflow check"
+
+  code_output:
+    - name: code_shield
+      latency_ms: 50
+      type: static_analysis
+      description: Static analysis of generated code
+
+  tool_call:
+    - name: parameter_validation
+      latency_ms: 1
+      type: deterministic
+      description: "C35: MCP parameter schema validation"
+    - name: domain_whitelist
+      latency_ms: 1
+      type: deterministic
+      description: "C28: Domain whitelisting for external calls"
+    - name: jit_permissions
+      latency_ms: 1
+      type: deterministic
+      description: "C17: JIT permission scoping"
+
+  tool_response:
+    - name: content_filter
+      latency_ms: 290
+      type: llm
+      description: Tool response content safety
+    - name: rag_validation
+      latency_ms: 10
+      type: classifier
+      description: "C33: RAG document validation"
+    - name: data_minimization
+      latency_ms: 5
+      type: deterministic
+      description: "C32: Data minimization enforcement"
+
+  inter_agent:
+    - name: agent_card_verification
+      latency_ms: 1
+      type: crypto
+      description: "C36: Cryptographic agent card verification"
+    - name: identity_verification
+      latency_ms: 1
+      type: crypto
+      description: "C12: SPIFFE/mTLS identity verification"
+    - name: collusion_detection
+      latency_ms: 5
+      type: classifier
+      description: Agent coordination/collusion anomaly detection
+
+  # FINOS-specific: observability controls that add per-request latency
+  audit:
+    - name: immutable_audit_log
+      latency_ms: 2
+      type: deterministic
+      description: "C9: Write-once audit trail (SOX/SR 11-7)"
+    - name: cryptographic_decision_binding
+      latency_ms: 1
+      type: crypto
+      description: "C20: Signed decision records for regulatory compliance"
+    - name: anomaly_detection
+      latency_ms: 5
+      type: classifier
+      description: "C15: Runtime behavioral anomaly detection"
