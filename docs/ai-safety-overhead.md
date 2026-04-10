@@ -471,6 +471,25 @@ This is the first empirical measurement of the "retry death spiral" described ea
 
 This demonstrates a practical finding: **the safety tax for software engineering workloads is almost entirely a configuration problem, not a compute problem.** The guard model works correctly — code review is specialized advice, code is intellectual property — but its category taxonomy does not align with the workload. A production deployment that fails to configure category overrides will see 96.4% of pipeline runs blocked. One that configures them correctly sees 1% overhead (latency-only, no retries).
 
+**Our audit measured the minimum case.** We ran 1 output check per step — 3 checks for a 3-step pipeline. A production deployment following Microsoft's Azure Foundry model or Meta's LlamaFirewall architecture checks at 4 intervention points per agent step (input, tool call, tool response, output), with multiple guard types at each point (content filter, prompt shield, alignment check, CodeShield for code). Microsoft's Agent Governance Toolkit adds inter-agent communication validation and MCP security gateway checks.
+
+For the same 3-step code review pipeline:
+
+| Safety configuration | Guard checks | Latency (at 290ms/check) | vs our measurement |
+|---------------------|-------------|------------------------|-------------------|
+| Our audit (output only) | 3 | 0.9s | 1.0x |
+| + Input content filters | 6 | 1.7s | 2.0x |
+| + Prompt shields | 9 | 2.6s | 3.0x |
+| + Alignment checks | 12 | 3.5s | 4.0x |
+| + CodeShield (code steps) | 13 | 3.8s | 4.3x |
+| + Inter-agent comm checks | 15 | 4.3s | 5.0x |
+| + MCP tool validation | 17 | 4.9s | 5.7x |
+| Full stack, 5-iteration loop | 90 | 26.1s | 30.0x |
+
+At 1M pipeline runs/month, the guard compute cost ranges from $3K (output-only, what we measured) to $90K (full-stack iterative agent). And this is with the S6/S8 category override — without it, multiply by the retry overhead.
+
+The false positive analysis still applies to every checkpoint that runs content classification. Disabling S6/S8 fixes the retry problem, but the latency overhead of 15-17 checks per pipeline run is structural — it's the cost of defense-in-depth regardless of whether any check finds anything.
+
 **Methodology**: `scripts/safety_audit.py` loaded 663 LLM outputs from 30 experiments, deduplicated to 224 unique outputs by content prefix, and ran each through Llama Guard 3-1B on Ollama. Full results saved to `results/safety_audit.json` (default) and `results/safety_audit_filtered.json` (S6+S8 excluded).
 
 ### Attention analysis reveals limits of keyword-based safety
