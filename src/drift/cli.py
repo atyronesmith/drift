@@ -1829,5 +1829,156 @@ def serve(model: str, host: str, port: int, log_file: str | None):
     start_server(model=model, host=host, port=port, log_file=log_file)
 
 
+@cli.command("safety-overhead")
+@click.option("--models-dir", default="security_models",
+              help="Directory containing security model YAML files.")
+@click.option("--model", "-m", "model_names", multiple=True,
+              help="Specific model file(s) to evaluate (default: all).")
+@click.option("--steps", default=3, help="Number of pipeline steps.")
+@click.option("--code-steps", default=1, help="Steps that produce code.")
+@click.option("--tool-calls", default=0.0, type=float,
+              help="Average tool/MCP calls per step.")
+@click.option("--iterations", default=1, help="Loop iterations.")
+@click.option("--pipeline", "pipeline_path", default=None,
+              type=click.Path(exists=True),
+              help="Infer pipeline shape from experiment YAML.")
+def safety_overhead(models_dir, model_names, steps, code_steps,
+                    tool_calls, iterations, pipeline_path):
+    """Compare safety overhead across security models.
+
+    Loads security model definitions and projects guard check counts,
+    latency, and cost for a given pipeline shape.
+
+    Examples:
+
+        drift safety-overhead --steps 3 --code-steps 1
+
+        drift safety-overhead --pipeline experiments/pipeline-structured.yaml
+
+        drift safety-overhead -m microsoft_foundry.yaml -m finos_regulated.yaml
+    """
+    from drift.safety.models import (
+        SecurityModel, PipelineShape, project_overhead, load_all_models,
+    )
+
+    models_path = Path(models_dir)
+    if not models_path.is_absolute():
+        models_path = Path.cwd() / models_path
+
+    # Load models
+    if model_names:
+        models = []
+        for name in model_names:
+            p = models_path / name
+            if not p.exists():
+                p = models_path / f"{name}.yaml"
+            if not p.exists():
+                click.echo(f"Model not found: {name}", err=True)
+                continue
+            models.append(SecurityModel.from_yaml(p))
+    else:
+        models = load_all_models(models_path)
+
+    if not models:
+        click.echo("No security models found.", err=True)
+        return
+
+    # Infer pipeline shape from config if provided
+    if pipeline_path:
+        config = yaml.safe_load(Path(pipeline_path).read_text())
+        exp = config.get("experiment", {})
+        exp_steps = exp.get("steps", [])
+        steps = len(exp_steps)
+        code_steps = 0
+        for s in exp_steps:
+            name = s.get("name", "").lower()
+            if any(kw in name for kw in ("implement", "code", "refactor", "fix")):
+                code_steps += 1
+        # Check for loop steps
+        for s in exp_steps:
+            if s.get("type") == "loop":
+                iterations = s.get("max_iterations", 5)
+                inner = s.get("steps", [])
+                steps = len(inner)
+                code_steps = sum(1 for s in inner
+                                 if any(kw in s.get("name", "").lower()
+                                        for kw in ("implement", "code", "refactor", "fix")))
+                break
+        click.echo(f"Pipeline: {Path(pipeline_path).stem}")
+    else:
+        click.echo(f"Pipeline shape: {steps} steps, {code_steps} code, "
+                    f"{tool_calls} tool calls/step, {iterations} iterations")
+
+    pipeline = PipelineShape(
+        steps=steps,
+        code_steps=code_steps,
+        tool_calls_per_step=tool_calls,
+        iterations=iterations,
+    )
+
+    click.echo(f"  Steps: {pipeline.steps} ({pipeline.code_steps} produce code)")
+    if pipeline.tool_calls_per_step:
+        click.echo(f"  Tool calls/step: {pipeline.tool_calls_per_step}")
+    if pipeline.iterations > 1:
+        click.echo(f"  Iterations: {pipeline.iterations}")
+    click.echo()
+
+    # Project overhead for each model
+    projections = []
+    for model in models:
+        proj = project_overhead(model, pipeline)
+        projections.append(proj)
+
+    # Comparison table
+    click.echo("=" * 80)
+    click.echo("SECURITY MODEL COMPARISON")
+    click.echo("=" * 80)
+
+    header = f"{'Model':<30s} {'Checks':>7s} {'LLM':>5s} {'Det':>5s} {'Latency':>9s} {'$/mo(1M)':>10s}"
+    click.echo(header)
+    click.echo("-" * 80)
+
+    for proj in projections:
+        click.echo(
+            f"{proj.model_name:<30s} "
+            f"{proj.total_checks:>7d} "
+            f"{proj.llm_checks:>5d} "
+            f"{proj.deterministic_checks:>5d} "
+            f"{proj.total_latency_ms/1000:>8.1f}s "
+            f"${proj.cost_per_month_1m:>9,.0f}"
+        )
+
+    # Detailed breakdown for each model
+    for proj in projections:
+        click.echo(f"\n{'─' * 80}")
+        click.echo(f"  {proj.model_name} (v{next((m.version for m in models if m.name == proj.model_name), '')})")
+        click.echo(f"{'─' * 80}")
+
+        for item in proj.breakdown:
+            cp = item["checkpoint"]
+            guards = ", ".join(item["guards"])
+            checks = item["total_checks"]
+            lat = item["latency_ms"]
+            click.echo(f"  {cp:<20s} {checks:>3d} checks  {lat:>8.1f}ms  [{guards}]")
+
+        click.echo(f"  {'':20s} {'───':>3s}         {'───────':>8s}")
+        click.echo(f"  {'TOTAL':<20s} {proj.total_checks:>3d} checks  {proj.total_latency_ms:>8.1f}ms")
+        click.echo(f"  LLM-based checks: {proj.llm_checks}  |  Deterministic: {proj.deterministic_checks}")
+
+    # Multiplier comparison
+    if len(projections) > 1:
+        baseline = projections[0]
+        click.echo(f"\n{'=' * 80}")
+        click.echo(f"OVERHEAD MULTIPLIERS (vs {baseline.model_name})")
+        click.echo(f"{'=' * 80}")
+        click.echo(f"{'Model':<30s} {'Checks':>8s} {'Latency':>9s} {'Cost':>8s}")
+        click.echo("-" * 60)
+        for proj in projections:
+            cm = proj.total_checks / baseline.total_checks if baseline.total_checks else 0
+            lm = proj.total_latency_ms / baseline.total_latency_ms if baseline.total_latency_ms else 0
+            costm = proj.cost_per_month_1m / baseline.cost_per_month_1m if baseline.cost_per_month_1m else 0
+            click.echo(f"{proj.model_name:<30s} {cm:>7.1f}x {lm:>8.1f}x {costm:>7.1f}x")
+
+
 if __name__ == "__main__":
     cli()

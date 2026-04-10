@@ -1,0 +1,31 @@
+name: Meta LlamaFirewall
+version: "2025"
+description: >
+  Meta's three-layer guardrail stack: PromptGuard 2 (input classifier),
+  AlignmentCheck (chain-of-thought auditor), and CodeShield (static
+  analysis). Reduced ASR from 17.6% to 1.75% but utility dropped to
+  42.7%.
+source: https://arxiv.org/abs/2505.03574
+
+checkpoints:
+  step_input:
+    - name: prompt_guard_2
+      latency_ms: 19
+      type: classifier
+      description: DeBERTa jailbreak/injection classifier (86M params)
+
+  step_output:
+    - name: alignment_check
+      latency_ms: 500
+      type: llm
+      description: Chain-of-thought reasoning auditor (Llama 3.3 70B)
+    - name: content_filter
+      latency_ms: 165
+      type: llm
+      description: Llama Guard 3-1B output classification
+
+  code_output:
+    - name: code_shield
+      latency_ms: 50
+      type: static_analysis
+      description: Static analysis across 8 languages, 50+ CWEs
