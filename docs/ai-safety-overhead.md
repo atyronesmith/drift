@@ -498,6 +498,50 @@ Drift's attention weight analysis (MLX, 50 tickets) found that classification fi
 
 This has a direct safety implication: keyword-based guardrails (blocklists, regex filters) cannot detect harmful classification because the model's reasoning is holistic, not keyword-driven. A guardrail that blocks "DELETE" can prevent a harmful SQL statement, but a guardrail that blocks individual words cannot prevent a harmful classification decision because no single word drives the decision.
 
+### Security model comparison: production guard overhead is 5-19x what we measured
+
+Our empirical audit measured 1 output check per step — the absolute minimum deployment. Production multi-agent systems deploy guards at every trust boundary: input, output, tool calls, tool responses, inter-agent communication, and audit logging.
+
+Drift's `safety-overhead` command (`drift safety-overhead`) projects guard overhead for four reference security architectures:
+
+**3-step code review pipeline (no tool calls):**
+
+| Security Model | Checks | LLM-based | Deterministic | Latency | $/mo at 1M runs |
+|---------------|--------|-----------|--------------|---------|----------------|
+| Drift Baseline (output only) | 3 | 3 | 0 | 0.9s | $3,000 |
+| Meta LlamaFirewall | 10 | 6 | 4 | 2.1s | $6,040 |
+| Microsoft Azure Foundry | 17 | 9 | 8 | 2.4s | $9,080 |
+| FINOS Regulated FSI | 40 | 6 | 34 | 2.1s | $6,340 |
+
+**5-iteration iterative pipeline with tool calls:**
+
+| Security Model | Checks | LLM-based | Deterministic | Latency | $/mo at 1M runs |
+|---------------|--------|-----------|--------------|---------|----------------|
+| Drift Baseline | 15 | 15 | 0 | 4.3s | $15,000 |
+| Meta LlamaFirewall | 50 | 30 | 20 | 10.5s | $30,200 |
+| Microsoft Azure Foundry | 130 | 60 | 70 | 16.6s | $60,700 |
+| FINOS Regulated FSI | 290 | 45 | 245 | 14.9s | $47,450 |
+
+Key findings from the comparison:
+
+1. **LLM-based checks dominate latency.** FINOS has the most total checks (290) but not the highest latency — 85% of its checks are deterministic (crypto verification, policy-as-code, schema validation) running in microseconds. Microsoft's model has fewer total checks (130) but more LLM-based ones (60), making it the most expensive.
+
+2. **The architectures guard different things.** LlamaFirewall focuses on the LLM interaction (input classifier + output auditor + code analysis). Microsoft adds tool-call and tool-response checkpoints. FINOS adds inter-agent trust verification, immutable audit trails (SOX/SR 11-7 compliance), DLP scanning for MNPI leakage, and cryptographic decision binding — controls driven by financial regulation, not just content safety.
+
+3. **The cost driver is LLM inference, not security controls.** Replacing LLM-based content filters (~290ms each) with classifier-based alternatives (~19ms for PromptGuard 2, ~50ms for DLP) would reduce FINOS latency from 14.9s to ~4s for the iterative pipeline — a 73% reduction. The 245 deterministic checks add less than 0.5s total.
+
+4. **No model catches what actually matters for code.** All four models run content safety classification (violence, hate, self-harm categories). None detect logic bugs, capability regressions, or data corruption — the actual threats in software engineering pipelines. CodeShield (static analysis, ~50ms) is the closest, but it catches known vulnerability patterns, not novel logic errors.
+
+**Security model definitions** are YAML files in `security_models/` — users can create custom models by adding a new file. See `drift safety-overhead --help`.
+
+Sources:
+- [Microsoft: Secure agentic AI end-to-end](https://www.microsoft.com/en-us/security/blog/2026/03/20/secure-agentic-ai-end-to-end/)
+- [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)
+- [Azure Foundry Guardrails Overview](https://learn.microsoft.com/en-us/azure/foundry/guardrails/guardrails-overview)
+- [LlamaFirewall (arXiv:2505.03574)](https://arxiv.org/abs/2505.03574)
+- [FINOS Multi-Agent Reference Architecture](https://github.com/finos-labs/ai-reference-architecture-library/tree/main/Library/reference-architecture/multi-agent)
+- [FINOS AI Governance Framework v1.0](https://www.finos.org/blog/finos-ai-governance-framework-v1.0-turning-drafts-into-deployable-guardrails)
+
 ## Gaps in the Research
 
 The following questions do not have published answers as of April 2026:
