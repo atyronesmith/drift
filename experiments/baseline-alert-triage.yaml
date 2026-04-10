@@ -1,0 +1,8 @@
+experiment:
+  name: baseline-alert-triage
+  model: qwen2.5:32b
+  temperature: 0
+  task: alert_triage
+
+  system_prompt_file: alert_system.md
+  user_prompt_file: alert_user.md
