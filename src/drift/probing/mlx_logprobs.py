@@ -73,8 +73,11 @@ def _probe_logprobs_with_model(
         generated_tokens.append(token_id)
 
         # Full-vocab log probabilities
-        log_probs = nn.log_softmax(logits.reshape(-1), axis=-1)
+        logits_flat = logits.reshape(-1)
+        log_probs = nn.log_softmax(logits_flat, axis=-1)
+        mx.eval(log_probs)  # Force evaluation to free computation graph
         log_probs_list = log_probs.tolist()
+        del logits_flat, log_probs, logits
 
         token_logprob = log_probs_list[token_id]
         token_prob = math.exp(token_logprob)

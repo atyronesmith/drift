@@ -130,6 +130,13 @@ class DriftMLXHandler(BaseHTTPRequestHandler):
         except Exception as e:
             log.exception("Request failed")
             self._send_json({"error": str(e)}, 500)
+        finally:
+            # Clear MLX cache to prevent memory accumulation across requests
+            try:
+                import mlx.core as mx
+                mx.metal.clear_cache()
+            except Exception:
+                log.debug("Failed to clear MLX metal cache", exc_info=True)
 
     def _handle_completions(self):
         """OpenAI-compatible chat completions."""
