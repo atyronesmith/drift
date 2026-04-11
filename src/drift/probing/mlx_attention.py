@@ -220,7 +220,9 @@ def _probe_attention_with_model(
             else:
                 avg_weights = avg_weights + head_avg
         avg_weights = avg_weights / len(captured)
+        mx.eval(avg_weights)  # Force evaluation before converting
         avg_list = avg_weights.tolist()
+        del avg_weights
 
         # Top-k attended positions (only consider input positions)
         input_weights = [(pos, avg_list[pos]) for pos in range(n_input)]
@@ -239,6 +241,9 @@ def _probe_attention_with_model(
             top_attended=top_attended,
             per_head=per_head,
         ))
+
+    # Release captured attention weight tensors
+    del captured
 
     return AttentionResult(
         input_tokens=input_tokens_decoded,
