@@ -12,6 +12,8 @@ class RuleResult:
     path: str
     value: str | int | float | list | None
     matched: bool
+    escalation_hint: str | None = None
+    escalation_confidence: float | None = None
 
 
 def execute_rule(rule: dict, input_text: str, extracted: dict | None = None) -> RuleResult:
@@ -211,8 +213,12 @@ def _classifier_rule(path: str, rule: dict, text: str, extracted: dict) -> RuleR
     if confidence >= threshold:
         return RuleResult(path=path, value=classes[best_idx], matched=True)
 
-    # Below threshold — escalate to LLM
-    return RuleResult(path=path, value=None, matched=False)
+    # Below threshold — escalate to LLM with tentative prediction
+    return RuleResult(
+        path=path, value=None, matched=False,
+        escalation_hint=classes[best_idx],
+        escalation_confidence=confidence,
+    )
 
 
 def _match_conditions(when: dict, extracted: dict) -> bool:

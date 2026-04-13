@@ -377,6 +377,70 @@ def test_discover_classifier_rules_basic():
     assert "assessment.summary" not in clf_paths
 
 
+def test_discover_classifier_rules_with_tier2_resolved():
+    """Classifier structured_features include Tier 2 (mapping) resolved paths."""
+    pytest.importorskip("sklearn")
+    import random
+    random.seed(42)
+
+    # Build probes that include a Tier 2 mapping output (assessment.severity)
+    # that correlates with root_cause:
+    #   Network → P2, Software → P3, Account → P1
+    severity_map = {"Network": "P2", "Software": "P3", "Account": "P1"}
+    categories = ["Network", "Software", "Account"]
+    root_causes = {"Network": "network", "Software": "software_bug", "Account": "access_control"}
+    descriptions = {
+        "Network": ["printer disconnecting", "network connectivity slow", "VPN drops"],
+        "Software": ["application crash", "software update failed", "integration bug"],
+        "Account": ["password reset", "account locked", "access denied"],
+    }
+
+    probes = []
+    for i in range(30):
+        cat = categories[i % len(categories)]
+        rc = root_causes[cat]
+        sev = severity_map[cat]
+        desc = random.choice(descriptions[cat])
+        output = {
+            "ticket": {"category": cat, "priority": "Medium"},
+            "assessment": {"root_cause": rc, "severity": sev,
+                          "summary": f"Ticket {i}"},
+        }
+        input_text = f"Category: {cat}\nPriority: Medium\nDescription: {desc}"
+        probe = _make_probe_with_entropy(
+            output, {"assessment.root_cause", "assessment.summary"}
+        )
+        probes.append((probe, input_text))
+
+    from drift.hybrid.autogen import _parse_llm_output, _get_nested
+    parsed = [_parse_llm_output(pd) for pd, _ in probes]
+
+    # tier1 = regex-extracted, tier2 = mapping-derived severity
+    tier1_paths = {"ticket.category", "ticket.priority"}
+    tier2_paths = {"assessment.severity"}
+    resolved_paths = tier1_paths | tier2_paths  # what synthesize_rules_multi now passes
+    llm_paths = {"assessment.root_cause", "assessment.summary"}
+
+    field_values = {}
+    for path in resolved_paths | llm_paths:
+        field_values[path] = [_get_nested(p, path) for p in parsed if p]
+
+    rules = _discover_classifier_rules(
+        probes, resolved_paths, llm_paths, field_values,
+        min_accuracy=0.60,
+    )
+
+    clf_paths = {r.path for r in rules}
+    assert "assessment.root_cause" in clf_paths
+
+    rc_rule = [r for r in rules if r.path == "assessment.root_cause"][0]
+    # Structured features should include the Tier 2 severity path
+    sf_sources = {sf["source"] for sf in rc_rule.structured_features}
+    assert "assessment.severity" in sf_sources
+    # Also includes Tier 1 category (has 3 unique values, within 2-20 range)
+    assert "ticket.category" in sf_sources
+
+
 def test_discover_classifier_rules_too_few_probes():
     """Returns empty when fewer than 20 probes."""
     pytest.importorskip("sklearn")

@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 
 from drift.hybrid.rules import execute_rule, execute_rules, set_nested, RuleResult
-from drift.hybrid.executor import deep_merge, build_hybrid_prompt, _parse_json_response
+from drift.hybrid.executor import deep_merge, build_hybrid_prompt, _parse_json_response, _format_escalation_hints
 
 
 # --- Rule tests ---
@@ -294,6 +294,11 @@ def test_classifier_rule_below_threshold():
     text = "network password reset disconnect access printer"
     result = execute_rule(rule, text, {})
     assert not result.matched  # should escalate to LLM
+    # Escalation enrichment: tentative prediction is preserved
+    assert result.escalation_hint is not None
+    assert result.escalation_hint in ["network", "access_control"]
+    assert result.escalation_confidence is not None
+    assert 0 < result.escalation_confidence < 0.99
 
 
 def test_classifier_rule_structured_features():
@@ -343,6 +348,142 @@ def test_classifier_rule_in_pipeline():
     assert results[1].matched
 
 
+def test_classifier_rule_with_tier2_mapping_feature():
+    """Classifier uses Tier 2 mapping output as a structured feature."""
+    text = "generic issue"  # no vocab signals
+    # Mapping rule has already resolved severity from priority
+    rule = {
+        "path": "assessment.root_cause_category",
+        "type": "classifier",
+        "vocabulary": ["zzz_unlikely_word"],
+        "weights": [
+            [0.0, 3.0, -1.0],  # network: strong weight on P2 severity
+            [0.0, -1.0, 3.0],  # access_control: strong weight on P3 severity
+        ],
+        "bias": [0.0, 0.0],
+        "classes": ["network", "access_control"],
+        "structured_features": [
+            {"source": "assessment.severity", "categories": ["P2", "P3"]},
+        ],
+        "confidence_threshold": 0.70,
+    }
+    # Tier 2 mapping already set assessment.severity = P2
+    result = execute_rule(rule, text, {"assessment": {"severity": "P2"}})
+    assert result.matched
+    assert result.value == "network"
+
+    # Tier 2 mapping already set assessment.severity = P3
+    result = execute_rule(rule, text, {"assessment": {"severity": "P3"}})
+    assert result.matched
+    assert result.value == "access_control"
+
+
+def test_classifier_rule_with_tier2_conditional_feature():
+    """Classifier uses Tier 2 conditional output as a structured feature."""
+    text = "generic issue"
+    rule = {
+        "path": "assessment.root_cause_category",
+        "type": "classifier",
+        "vocabulary": ["zzz_unlikely_word"],
+        "weights": [
+            [0.0, 3.0, -1.0, -1.0],  # network: strong on P2
+            [0.0, -1.0, 3.0, -1.0],   # access_control: strong on P3
+        ],
+        "bias": [0.0, 0.0],
+        "classes": ["network", "access_control"],
+        "structured_features": [
+            {"source": "assessment.severity", "categories": ["P2", "P3", "P4"]},
+        ],
+        "confidence_threshold": 0.70,
+    }
+    # Conditional rule resolved severity to P3
+    result = execute_rule(rule, text, {"assessment": {"severity": "P3"}})
+    assert result.matched
+    assert result.value == "access_control"
+
+
+def test_classifier_pipeline_regex_mapping_classifier():
+    """Full pipeline: regex → mapping (Tier 2) → classifier (Tier 3) with Tier 2 feature."""
+    rules = [
+        # Tier 1: extract raw priority
+        {"path": "ticket.priority", "type": "regex",
+         "pattern": r"Priority:\s*(\S+)\s*$"},
+        # Tier 2: map priority to severity
+        {"path": "assessment.severity", "type": "mapping",
+         "source": "ticket.priority",
+         "map": {"High": "P2", "Medium": "P3", "Low": "P4"}},
+        # Tier 3: classifier uses severity (Tier 2) as a structured feature
+        {
+            "path": "assessment.root_cause_category",
+            "type": "classifier",
+            "vocabulary": ["printer", "disconnect", "password", "access"],
+            "weights": [
+                # network: printer/disconnect + P2 severity → strong signal
+                [2.0, 2.0, -1.0, -1.0, 3.0, -1.0, -1.0],
+                # access_control: password/access + P3 severity → strong signal
+                [-1.0, -1.0, 2.0, 2.0, -1.0, 3.0, -1.0],
+            ],
+            "bias": [0.0, 0.0],
+            "classes": ["network", "access_control"],
+            "structured_features": [
+                {"source": "assessment.severity",
+                 "categories": ["P2", "P3", "P4"]},
+            ],
+            "confidence_threshold": 0.60,
+        },
+    ]
+    text = "Priority: High\nThe printer keeps disconnecting from the network"
+    extracted, results = execute_rules(rules, text)
+    assert extracted["ticket"]["priority"] == "High"
+    assert extracted["assessment"]["severity"] == "P2"
+    assert extracted["assessment"]["root_cause_category"] == "network"
+    assert all(r.matched for r in results)
+
+
+def test_classifier_pipeline_regex_conditional_classifier():
+    """Full pipeline: regex → conditional (Tier 2) → classifier (Tier 3)."""
+    rules = [
+        # Tier 1: extract priority and category
+        {"path": "ticket.priority", "type": "regex",
+         "pattern": r"Priority:\s*(\S+)\s*$"},
+        {"path": "ticket.category", "type": "regex",
+         "pattern": r"Category:\s*(\S+)\s*$"},
+        # Tier 2: conditional severity from priority+category
+        {
+            "path": "assessment.severity", "type": "conditional",
+            "conditions": [
+                {"when": {"ticket.priority": "High", "ticket.category": "Account"}, "value": "P1"},
+                {"when": {"ticket.priority": "High"}, "value": "P2"},
+                {"when": {"ticket.priority": "Medium"}, "value": "P3"},
+            ],
+            "default": "P4",
+        },
+        # Tier 3: classifier conditioned on severity
+        {
+            "path": "assessment.root_cause_category",
+            "type": "classifier",
+            "vocabulary": ["password", "locked"],
+            "weights": [
+                # access_control: password/locked + P1 severity
+                [2.0, 2.0, 5.0, -1.0, -1.0, -1.0],
+                # network: negative on all
+                [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+            ],
+            "bias": [0.0, 0.0],
+            "classes": ["access_control", "network"],
+            "structured_features": [
+                {"source": "assessment.severity",
+                 "categories": ["P1", "P2", "P3", "P4"]},
+            ],
+            "confidence_threshold": 0.60,
+        },
+    ]
+    text = "Priority: High\nCategory: Account\nUser password locked out"
+    extracted, results = execute_rules(rules, text)
+    assert extracted["assessment"]["severity"] == "P1"
+    assert extracted["assessment"]["root_cause_category"] == "access_control"
+
+
 # --- Executor tests ---
 
 def test_deep_merge_simple():
@@ -388,6 +529,92 @@ def test_parse_json_response_fenced():
 def test_parse_json_response_invalid():
     result = _parse_json_response("not json at all")
     assert "_raw" in result
+
+
+# --- Escalation enrichment tests ---
+
+def test_format_escalation_hints_empty():
+    assert _format_escalation_hints(None) == ""
+    assert _format_escalation_hints([]) == ""
+
+
+def test_format_escalation_hints_with_entries():
+    hints = [
+        {"path": "assessment.root_cause", "hint": "network", "confidence": 0.72},
+        {"path": "assessment.severity", "hint": "P2", "confidence": 0.55},
+    ]
+    result = _format_escalation_hints(hints)
+    assert "tentative predictions" in result
+    assert 'assessment.root_cause' in result
+    assert '"network"' in result
+    assert "72.0%" in result
+    assert 'assessment.severity' in result
+    assert '"P2"' in result
+    assert "55.0%" in result
+
+
+def test_build_hybrid_prompt_with_escalation_hints():
+    hints = [
+        {"path": "assessment.root_cause", "hint": "network", "confidence": 0.68},
+    ]
+    prompt = build_hybrid_prompt(
+        "some input", {"field1": "val1"}, ["severity", "root_cause"],
+        escalation_hints=hints,
+    )
+    assert "field1" in prompt
+    assert "tentative predictions" in prompt
+    assert '"network"' in prompt
+    assert "68.0%" in prompt
+
+
+def test_build_hybrid_prompt_no_hints_no_hint_block():
+    prompt = build_hybrid_prompt(
+        "some input", {"field1": "val1"}, ["severity"],
+        escalation_hints=[],
+    )
+    assert "tentative" not in prompt
+
+
+def test_build_hybrid_prompt_template_with_hints():
+    tpl = "Extracted: {extracted_fields}\nHints: {escalation_hints}\nAnalyze: {llm_fields}\nInput: {input}"
+    hints = [
+        {"path": "assessment.root_cause", "hint": "network", "confidence": 0.68},
+    ]
+    prompt = build_hybrid_prompt("my input", {"a": 1}, ["x", "y"], tpl,
+                                 escalation_hints=hints)
+    assert "Hints:" in prompt
+    assert '"network"' in prompt
+
+
+def test_classifier_escalation_preserves_hint_in_pipeline():
+    """Classifier escalation in execute_rules preserves hint for LLM enrichment."""
+    rules = [
+        {"path": "ticket.category", "type": "regex",
+         "pattern": r"Category:\s*(\S+)\s*$"},
+        {
+            "path": "assessment.root_cause_category",
+            "type": "classifier",
+            "vocabulary": ["printer", "disconnect", "password", "access"],
+            "weights": [
+                [1.0, 1.0, -1.0, -1.0],
+                [-1.0, -1.0, 1.0, 1.0],
+            ],
+            "bias": [0.0, 0.0],
+            "classes": ["network", "access_control"],
+            "structured_features": [],
+            "confidence_threshold": 0.9999,  # force escalation
+        },
+    ]
+    text = "Category: Network\nThe printer keeps disconnecting"
+    extracted, results = execute_rules(rules, text)
+    assert extracted["ticket"]["category"] == "Network"
+    # Classifier should escalate (threshold too high)
+    assert not results[1].matched
+    assert "root_cause_category" not in extracted.get("assessment", {})
+    # But escalation hint should be preserved
+    assert results[1].escalation_hint == "network"
+    assert results[1].escalation_confidence is not None
+    assert results[1].escalation_confidence > 0
 
 
 # --- Full hybrid spec validation ---

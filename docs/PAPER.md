@@ -140,6 +140,8 @@ One command (`drift build`) runs all three steps. The resulting engine handles e
 
 ### 3.2 Input-Side: Pre-Digestion
 
+> **Implementation:** The pre-digestion library is the [denoise](https://github.com/atyronesmith/drift) sibling repo — see denoise's `docs/PREDIGESTION.md` for theory and results.
+
 For applications with large, noisy inputs (logs, traces, documents), deterministic preprocessing reduces what the LLM sees:
 
 - **Level 1** — Strip noise lines (status messages, timestamps, progress indicators) while preserving a window around errors
