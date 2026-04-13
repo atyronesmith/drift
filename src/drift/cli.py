@@ -29,14 +29,15 @@ def _guard_check(guard, content: str, label: str) -> dict | None:
     try:
         result = guard.check(content)
         verdict = "SAFE" if result.safe else f"UNSAFE ({result.category})"
-        click.echo(f"      guard: {verdict} ({result.latency_ms:.0f}ms)")
+        tiered = " [tiered]" if "tiered:" in result.raw_response else ""
+        click.echo(f"      guard: {verdict} ({result.latency_ms:.0f}ms){tiered}")
         return result.to_dict()
     except Exception as e:
         click.echo(f"      guard: ERROR ({e})")
         return {"safe": None, "category": None, "latency_ms": None, "error": str(e)}
 
 
-def _guard_summary(all_checks: list[dict]):
+def _guard_summary(all_checks: list[dict], guard=None):
     """Print guard summary statistics at end of experiment."""
     if not all_checks:
         return
@@ -63,6 +64,17 @@ def _guard_summary(all_checks: list[dict]):
         cats = Counter(c.get("category") for c in flat if c.get("safe") is False)
         for cat, count in cats.most_common():
             click.echo(f"  {cat}: {count}")
+
+    # Print tiered guard stats if applicable
+    if guard and hasattr(guard, "summary"):
+        stats = guard.summary()
+        if stats.get("total", 0) > 0:
+            click.echo(f"\n  Tiered guard stats:")
+            click.echo(f"    Tier 1 (keyword):    {stats['tier1']}")
+            click.echo(f"    Tier 2 (classifier): {stats['tier2']}")
+            click.echo(f"    Tier 3 (LLM guard):  {stats['escalated']}")
+            click.echo(f"    Classifier handled:  {stats['classifier_handled_pct']}%")
+            click.echo(f"    Escalation rate:     {stats['escalation_pct']}%")
 
 
 async def _run_baseline(config: dict, num_runs: int, output_dir: str, guard=None) -> Path:
@@ -99,7 +111,7 @@ async def _run_baseline(config: dict, num_runs: int, output_dir: str, guard=None
             guard_checks.append(gc)
         save_run(run_dir, i, result)
 
-    _guard_summary(guard_checks)
+    _guard_summary(guard_checks, guard)
     click.echo(f"\nDone. Results saved to {run_dir}")
     return run_dir
 
@@ -164,7 +176,7 @@ async def _run_pipeline(config: dict, num_runs: int, output_dir: str, guard=None
             result["guard"] = run_guard
         save_run(run_dir, i, result)
 
-    _guard_summary(guard_checks)
+    _guard_summary(guard_checks, guard)
     click.echo(f"\nDone. Results saved to {run_dir}")
     return run_dir
 
@@ -237,7 +249,7 @@ async def _run_hybrid(config: dict, num_runs: int, output_dir: str, guard=None) 
             guard_checks.append(gc)
         save_run(run_dir, i, result)
 
-    _guard_summary(guard_checks)
+    _guard_summary(guard_checks, guard)
     click.echo(f"\nDone. Results saved to {run_dir}")
     return run_dir
 
@@ -258,9 +270,14 @@ def cli():
               help="Ollama base URL for guard model.")
 @click.option("--exclude-categories", default=None,
               help="Comma-separated guard categories to ignore (e.g. S6,S8).")
+@click.option("--tiered-guard", default=None, type=click.Path(exists=True),
+              help="Path to guard classifier weights JSON (enables tiered guard).")
+@click.option("--guard-keywords", default=None, type=click.Path(exists=True),
+              help="Path to guard Tier 1 keywords JSON (optional, for --tiered-guard).")
 def run(config_path: str, runs: int, output_dir: str,
         safety_guard: str | None, guard_base_url: str | None,
-        exclude_categories: str | None):
+        exclude_categories: str | None,
+        tiered_guard: str | None, guard_keywords: str | None):
     """Run an experiment from a YAML config."""
     config = yaml.safe_load(Path(config_path).read_text())
     config = resolve_task_prompts(config, Path.cwd() / "tasks")
@@ -269,10 +286,17 @@ def run(config_path: str, runs: int, output_dir: str,
     if safety_guard:
         from drift.safety.guard import GuardModel
         excluded = [c.strip() for c in exclude_categories.split(",")] if exclude_categories else []
-        guard = GuardModel(model=safety_guard, base_url=guard_base_url,
-                           exclude_categories=excluded)
-        click.echo(f"Safety guard: {safety_guard}"
-                   + (f" (excluding {','.join(excluded)})" if excluded else ""))
+        base_guard = GuardModel(model=safety_guard, base_url=guard_base_url,
+                                exclude_categories=excluded)
+        if tiered_guard:
+            from drift.safety.guard import TieredGuard
+            guard = TieredGuard(base_guard, tiered_guard, guard_keywords)
+            click.echo(f"Safety guard: {safety_guard} (tiered, weights={tiered_guard})"
+                       + (f" (excluding {','.join(excluded)})" if excluded else ""))
+        else:
+            guard = base_guard
+            click.echo(f"Safety guard: {safety_guard}"
+                       + (f" (excluding {','.join(excluded)})" if excluded else ""))
 
     exp_type = config["experiment"].get("type", "baseline")
     if exp_type == "pipeline":
