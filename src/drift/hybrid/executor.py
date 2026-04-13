@@ -49,24 +49,53 @@ def build_hybrid_prompt(
     extracted: dict,
     llm_fields: list[str],
     hybrid_prompt_template: str | None = None,
+    escalation_hints: list[dict] | None = None,
 ) -> str:
-    """Build a focused LLM prompt that includes extracted fields."""
+    """Build a focused LLM prompt that includes extracted fields.
+
+    Args:
+        original_input: Raw input text
+        extracted: Already-extracted fields from rules
+        llm_fields: Fields the LLM should produce
+        hybrid_prompt_template: Optional custom template
+        escalation_hints: Tentative classifier predictions that were below
+            confidence threshold, each with path/hint/confidence keys
+    """
+    hint_block = _format_escalation_hints(escalation_hints)
+
     if hybrid_prompt_template:
         return hybrid_prompt_template.replace(
             "{extracted_fields}", json.dumps(extracted, indent=2)
         ).replace("{input}", original_input).replace(
             "{llm_fields}", ", ".join(llm_fields)
-        )
+        ).replace("{escalation_hints}", hint_block)
 
     # Default template
-    return (
+    parts = [
         f"The following fields have already been extracted from the input:\n"
-        f"```json\n{json.dumps(extracted, indent=2)}\n```\n\n"
+        f"```json\n{json.dumps(extracted, indent=2)}\n```\n",
+    ]
+    if hint_block:
+        parts.append(hint_block + "\n")
+    parts.append(
         f"Based on the input below, provide ONLY the following analysis fields as valid JSON:\n"
         f"{', '.join(llm_fields)}\n\n"
         f"Do not repeat the already-extracted fields. Output valid JSON only.\n\n"
         f"{original_input}"
     )
+    return "\n".join(parts)
+
+
+def _format_escalation_hints(hints: list[dict] | None) -> str:
+    """Format escalation hints for inclusion in LLM prompt."""
+    if not hints:
+        return ""
+    lines = ["A classifier made tentative predictions for the following fields "
+             "but was not confident enough. Verify or correct these:"]
+    for h in hints:
+        pct = round(h["confidence"] * 100, 1)
+        lines.append(f"  - {h['path']}: tentatively \"{h['hint']}\" ({pct}% confidence)")
+    return "\n".join(lines)
 
 
 async def run_hybrid(
@@ -97,6 +126,14 @@ async def run_hybrid(
     extracted, rule_results = execute_rules(rules, input_text)
     rules_matched = sum(1 for r in rule_results if r.matched)
 
+    # Collect escalation hints from classifier rules that were below threshold
+    escalation_hints = [
+        {"path": r.path, "hint": r.escalation_hint,
+         "confidence": r.escalation_confidence}
+        for r in rule_results
+        if r.escalation_hint is not None
+    ]
+
     # Phase 2: Resolve template vars in system prompt, build user prompt, call LLM
     resolved_system = system_prompt.replace(
         "{extracted_fields}", json.dumps(extracted, indent=2)
@@ -104,7 +141,8 @@ async def run_hybrid(
         "{llm_fields}", ", ".join(llm_fields)
     )
     prompt = build_hybrid_prompt(
-        input_text, extracted, llm_fields, hybrid_prompt_template
+        input_text, extracted, llm_fields, hybrid_prompt_template,
+        escalation_hints=escalation_hints,
     )
     response = await provider.complete(resolved_system, prompt, temperature=temperature)
 

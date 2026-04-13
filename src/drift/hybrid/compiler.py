@@ -163,20 +163,20 @@ def compile_engine(
             field_id = _field_id(rule["path"])
             path = rule["path"]
             has_sf = bool(rule.get("structured_features"))
-            lines.append(f"    _clf_val, _clf_conf = _classify_{field_id}(input_text{', result' if has_sf else ''})")
-            lines.append(f"    if _clf_val is not None:")
+            lines.append(f"    _clf_val, _clf_conf, _clf_ok = _classify_{field_id}(input_text{', result' if has_sf else ''})")
+            lines.append(f"    if _clf_ok:")
             lines.append(f"        _set(result, {path!r}, _clf_val)")
             lines.append(f"    else:")
-            lines.append(f"        _escalated.append({path!r})")
+            lines.append(f"        _escalated.append(({path!r}, _clf_val, _clf_conf))")
         lines.append(f"")
 
     # Tier 4: LLM call
     if llm_fields:
         if classifier_rules:
             lines.append(f"    # --- Tier 4: LLM for reasoning fields + escalations ---")
-            lines.append(f"    _llm_fields = LLM_FIELDS + _escalated")
+            lines.append(f"    _llm_fields = LLM_FIELDS + [e[0] for e in _escalated]")
             lines.append(f"    if llm and _llm_fields:")
-            lines.append(f"        _llm_result = _call_llm(llm, input_text, result, _llm_fields)")
+            lines.append(f"        _llm_result = _call_llm(llm, input_text, result, _llm_fields, _escalated)")
         else:
             lines.append(f"    # --- Tier 4: LLM for reasoning fields ---")
             lines.append(f"    if llm:")
@@ -226,8 +226,8 @@ def compile_engine(
         lines.append(f"    probs = [e / total for e in exps]")
         lines.append(f"    best = max(range(n_classes), key=lambda i: probs[i])")
         lines.append(f"    if probs[best] >= _CLF_{field_id}_THRESHOLD:")
-        lines.append(f"        return _CLF_{field_id}_CLASSES[best], probs[best]")
-        lines.append(f"    return None, probs[best]")
+        lines.append(f"        return _CLF_{field_id}_CLASSES[best], probs[best], True")
+        lines.append(f"    return _CLF_{field_id}_CLASSES[best], probs[best], False")
         lines.append(f"")
         lines.append(f"")
 
@@ -286,7 +286,7 @@ def compile_engine(
 
         # _call_llm
         if classifier_rules:
-            lines.append(f"def _call_llm(llm, input_text: str, extracted: dict, fields: list[str] | None = None) -> dict:")
+            lines.append(f"def _call_llm(llm, input_text: str, extracted: dict, fields: list[str] | None = None, escalated: list | None = None) -> dict:")
             lines.append(f'    """Call LLM for reasoning fields + escalated classifier fields."""')
             lines.append(f"    fields_str = ', '.join(fields or LLM_FIELDS)")
         else:
@@ -294,9 +294,19 @@ def compile_engine(
             lines.append(f'    """Call LLM for reasoning fields only."""')
             lines.append(f"    fields_str = ', '.join(LLM_FIELDS)")
         lines.append(f"    extracted_json = json.dumps(extracted, indent=2)")
+        if classifier_rules:
+            lines.append(f"    hint_block = ''")
+            lines.append(f"    if escalated:")
+            lines.append(f"        hint_lines = ['A classifier made tentative predictions for the following fields '")
+            lines.append(f"                      'but was not confident enough. Verify or correct these:']")
+            lines.append(f"        for path, hint, conf in escalated:")
+            lines.append(f"            hint_lines.append(f'  - {{path}}: tentatively \"{{hint}}\" ({{round(conf * 100, 1)}}% confidence)')")
+            lines.append(f"        hint_block = '\\n'.join(hint_lines) + '\\n\\n'")
         lines.append(f"    prompt = (")
         lines.append(f'        "The following fields have already been extracted:\\n"')
         lines.append(f'        f"```json\\n{{extracted_json}}\\n```\\n\\n"')
+        if classifier_rules:
+            lines.append(f"        f\"{{hint_block}}\"")
         lines.append(f'        "Based on the input below, provide ONLY these fields as valid JSON:\\n"')
         lines.append(f'        f"{{fields_str}}\\n\\n"')
         lines.append(f'        "Do not repeat already-extracted fields. Output valid JSON only.\\n\\n"')

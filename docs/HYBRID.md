@@ -594,6 +594,10 @@ Adding `(one of: Access Management, Account Management, ...)` to the assignment_
 
 **Missing fields**: The auto-generator can only create rules for fields present in the LLM output. If the model omits important information, a human must add those rules manually.
 
+## Runtime Library
+
+The [denoise](https://github.com/atyronesmith/drift) sibling repo provides the production runtime for pre-digestion and tiered classification. Drift trains and validates; denoise runs in production. See denoise's `docs/GUARD.md` for the guard module and `docs/PREDIGESTION.md` for pre-digestion theory and results.
+
 ## Source Code
 
 | File | Purpose |

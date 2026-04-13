@@ -79,6 +79,8 @@ This gives `drift measure` a prescriptive output beyond "here's how much your ou
 
 ## Drift as Task-Aware Compression
 
+> **Note:** The practical application of this theory is implemented in the [denoise](https://github.com/atyronesmith/drift) sibling repo — see denoise's `docs/PREDIGESTION.md` for results and usage.
+
 Drift follows the same fundamental rules as lossless text compression. Both identify and eliminate redundancy — the difference is that drift is *lossy* and *task-aware*: the discarded bits are guaranteed to be noise for the downstream task, so reconstruction isn't needed.
 
 ### The Entropy Bound

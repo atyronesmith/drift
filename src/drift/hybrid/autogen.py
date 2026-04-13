@@ -39,6 +39,7 @@ class GeneratedRule:
     classes: list[str] | None = None
     confidence_threshold: float | None = None
     structured_features: list[dict] | None = None
+    baseline_distribution: dict | None = None
 
 
 @dataclass
@@ -906,7 +907,7 @@ STOPWORDS = {
 
 def _discover_classifier_rules(
     probes: list[tuple[dict, str]],
-    tier1_paths: set[str],
+    resolved_paths: set[str],
     llm_paths: set[str],
     field_values: dict[str, list],
     vocab_size: int = 150,
@@ -918,6 +919,11 @@ def _discover_classifier_rules(
     For each llm_required field with < 20 unique values, trains a logistic
     regression classifier on bag-of-words + structured features. Fields
     that pass the accuracy threshold are emitted as classifier rules.
+
+    Structured features are drawn from all resolved paths (Tier 1 and Tier 2).
+    This allows classifiers to condition on values extracted by regex or
+    computed by mapping/conditional rules, improving accuracy when
+    classification fields correlate with earlier-tier outputs.
 
     Requires scikit-learn (optional dependency). Returns empty list if
     unavailable or too few probes.
@@ -970,18 +976,18 @@ def _discover_classifier_rules(
     vocab = [w for w, _ in word_counts.most_common(vocab_size)]
     vocab_index = {w: i for i, w in enumerate(vocab)}
 
-    # Identify structured feature sources from Tier 1 fields
+    # Identify structured feature sources from resolved fields (Tier 1 + Tier 2)
     structured_features = []
-    tier1_categories = {}
-    for t1_path in sorted(tier1_paths):
-        vals = field_values.get(t1_path, [])
+    resolved_categories = {}
+    for res_path in sorted(resolved_paths):
+        vals = field_values.get(res_path, [])
         unique_vals = sorted(set(str(v) for v in vals if v is not None))
         if 2 <= len(unique_vals) <= 20:
             structured_features.append({
-                "source": t1_path,
+                "source": res_path,
                 "categories": unique_vals,
             })
-            tier1_categories[t1_path] = unique_vals
+            resolved_categories[res_path] = unique_vals
 
     # Build feature matrix
     n_sf = sum(len(sf["categories"]) for sf in structured_features)
@@ -1041,6 +1047,28 @@ def _discover_classifier_rules(
         # Fit on full data and export weights
         lr.fit(X_field, y)
 
+        # Compute baseline confidence distribution for drift detection
+        from drift.hybrid.calibration import compute_baseline
+        training_extracted = []
+        for i in range(n):
+            ext = {}
+            for sf in structured_features:
+                src = sf["source"]
+                vals = field_values.get(src, [None] * n)
+                if i < len(vals) and vals[i] is not None:
+                    _set_nested_simple(ext, src, vals[i])
+            training_extracted.append(ext)
+
+        baseline = compute_baseline(
+            weights=lr.coef_.tolist(),
+            bias=lr.intercept_.tolist(),
+            classes=list(lr.classes_),
+            vocabulary=vocab,
+            structured_features=structured_features if structured_features else None,
+            training_texts=input_texts,
+            training_extracted=training_extracted,
+        )
+
         rules.append(GeneratedRule(
             path=path,
             value=None,
@@ -1055,9 +1083,18 @@ def _discover_classifier_rules(
             classes=list(lr.classes_),
             confidence_threshold=confidence_threshold,
             structured_features=structured_features if structured_features else None,
+            baseline_distribution=baseline,
         ))
 
     return rules
+
+
+def _set_nested_simple(obj: dict, path: str, value) -> None:
+    """Set a value in a nested dict using dot notation."""
+    keys = path.split(".")
+    for key in keys[:-1]:
+        obj = obj.setdefault(key, {})
+    obj[keys[-1]] = value
 
 
 def synthesize_rules_multi(
@@ -1147,8 +1184,10 @@ def synthesize_rules_multi(
             if p is not None
         ]
 
+    # Tier 3 classifiers can use both Tier 1 and Tier 2 outputs as features
+    resolved_paths = tier1_paths | tier2_paths
     tier3_rules = _discover_classifier_rules(
-        probes, tier1_paths, remaining_llm_paths, all_field_values,
+        probes, resolved_paths, remaining_llm_paths, all_field_values,
         confidence_threshold=confidence_threshold,
         min_accuracy=min_accuracy,
     )
@@ -1189,6 +1228,7 @@ def synthesize_rules_multi(
         stats["tier2_types"][r.rule_type] += 1
     stats["tier3_discovered"] = len(tier3_rules)
     stats["tier3_fields"] = [r.path for r in tier3_rules]
+    stats["tier3_conditional_features"] = len(resolved_paths) - len(tier1_paths)
     if attention_hints:
         stats["attention_hints"] = len(attention_hints)
         stats["attention_fields"] = {k: v[0] for k, v in attention_hints.items()}
@@ -1272,6 +1312,8 @@ def render_hybrid_yaml(result: SynthesisResult) -> str:
                 sf_str = pyyaml.dump(rule.structured_features, default_flow_style=True).strip()
                 lines.append(f"    structured_features: {sf_str}")
             lines.append(f"    confidence_threshold: {rule.confidence_threshold}")
+            if rule.baseline_distribution:
+                lines.append(f"    baseline_distribution: {json.dumps(rule.baseline_distribution)}")
         elif rule.pattern:
             yaml_str = pyyaml.dump(rule.pattern, default_style='"').strip()
             lines.append(f"    pattern: {yaml_str}")

@@ -154,6 +154,21 @@ def test_compiled_classifier_escalation():
     assert "root_cause" not in result.get("assessment", {})
 
 
+def test_compiled_classifier_escalation_hint_in_prompt():
+    """Escalated classifier includes tentative prediction in _call_llm prompt."""
+    strict_rule = dict(CLASSIFIER_RULE, confidence_threshold=0.9999)
+    rules = [strict_rule]
+    code = compile_engine(rules, ["summary"], "You are a bot.", "test_clf")
+    # Verify the compiled code includes escalation hint formatting
+    assert "tentative predictions" in code
+    assert "Verify or correct" in code
+    # Verify the 3-tuple return from classifier
+    assert "return _CLF_ASSESSMENT_ROOT_CAUSE_CLASSES[best], probs[best], False" in code
+    assert "return _CLF_ASSESSMENT_ROOT_CAUSE_CLASSES[best], probs[best], True" in code
+    # Verify escalated list stores tuples with hint info
+    assert "_escalated.append((" in code
+
+
 def test_compiled_classifier_has_math_import():
     rules = [CLASSIFIER_RULE]
     code = compile_engine(rules, [], "prompt", "test")
@@ -164,6 +179,78 @@ def test_compiled_classifier_docstring_tiers():
     rules = SAMPLE_RULES + [CLASSIFIER_RULE]
     code = compile_engine(rules, ["summary"], "prompt", "test")
     assert "Tier 3 (classifier): 1 fields" in code
+
+
+def test_compiled_classifier_with_tier2_mapping_feature():
+    """Compiled engine: regex → mapping → classifier using mapping as structured feature."""
+    rules = [
+        {"path": "ticket.priority", "type": "regex", "pattern": r"Priority:\s*(\S+)\s*$"},
+        {"path": "assessment.severity", "type": "mapping",
+         "source": "ticket.priority",
+         "map": {"High": "P2", "Medium": "P3", "Low": "P4"}},
+        {
+            "path": "assessment.root_cause",
+            "type": "classifier",
+            "classifier_type": "logistic_regression",
+            "vocabulary": ["printer", "disconnect", "password", "access"],
+            "weights": [
+                [2.0, 2.0, -1.0, -1.0, 3.0, -1.0, -1.0],
+                [-1.0, -1.0, 2.0, 2.0, -1.0, 3.0, -1.0],
+            ],
+            "bias": [0.0, 0.0],
+            "classes": ["network", "access_control"],
+            "structured_features": [
+                {"source": "assessment.severity", "categories": ["P2", "P3", "P4"]},
+            ],
+            "confidence_threshold": 0.60,
+        },
+    ]
+    code = compile_engine(rules, [], "You are a bot.", "test_tier2")
+    compile(code, "<test>", "exec")  # valid Python
+    ns = {}
+    exec(code, ns)
+    result = ns["process"]("Priority: High\nThe printer keeps disconnecting")
+    assert result["assessment"]["severity"] == "P2"
+    assert result["assessment"]["root_cause"] == "network"
+
+
+def test_compiled_classifier_with_tier2_conditional_feature():
+    """Compiled engine: regex → conditional → classifier using conditional as structured feature."""
+    rules = [
+        {"path": "ticket.priority", "type": "regex", "pattern": r"Priority:\s*(\S+)\s*$"},
+        {"path": "ticket.category", "type": "regex", "pattern": r"Category:\s*(\S+)\s*$"},
+        {
+            "path": "assessment.severity", "type": "conditional",
+            "conditions": [
+                {"when": {"ticket.priority": "High", "ticket.category": "Account"}, "value": "P1"},
+                {"when": {"ticket.priority": "High"}, "value": "P2"},
+            ],
+            "default": "P3",
+        },
+        {
+            "path": "assessment.root_cause",
+            "type": "classifier",
+            "classifier_type": "logistic_regression",
+            "vocabulary": ["password", "locked"],
+            "weights": [
+                [2.0, 2.0, 5.0, -1.0, -1.0],
+                [-1.0, -1.0, -1.0, 2.0, -1.0],
+            ],
+            "bias": [0.0, 0.0],
+            "classes": ["access_control", "network"],
+            "structured_features": [
+                {"source": "assessment.severity", "categories": ["P1", "P2", "P3"]},
+            ],
+            "confidence_threshold": 0.60,
+        },
+    ]
+    code = compile_engine(rules, [], "You are a bot.", "test_tier2_cond")
+    compile(code, "<test>", "exec")
+    ns = {}
+    exec(code, ns)
+    result = ns["process"]("Priority: High\nCategory: Account\nUser password locked out")
+    assert result["assessment"]["severity"] == "P1"
+    assert result["assessment"]["root_cause"] == "access_control"
 
 
 def test_validate_command(tmp_path):
