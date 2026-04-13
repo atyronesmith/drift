@@ -127,6 +127,71 @@ class GuardModel:
             )
 
 
+class TieredGuard:
+    """Tiered safety guard: denoise classifier first, LLM guard on escalation.
+
+    Uses denoise.guard.classify() for fast Tier 1/2 classification.
+    Only escalates to the full LLM guard (GuardModel) when the classifier
+    confidence is below threshold. Tracks per-tier statistics.
+    """
+
+    def __init__(
+        self,
+        guard_model: GuardModel,
+        weights_path: str,
+        keywords_path: str | None = None,
+    ):
+        self.guard_model = guard_model
+        self.stats = {"tier1": 0, "tier2": 0, "escalated": 0, "total": 0}
+
+        from denoise.guard import load_weights
+        load_weights(weights_path, keywords_path)
+
+    def check(self, content: str, prompt: str = "") -> GuardResult:
+        """Check content safety using tiered classification.
+
+        Tier 1/2 (denoise classifier, <1ms) handles most inputs.
+        Tier 3 (LLM guard) only called on escalation.
+
+        Returns:
+            GuardResult compatible with GuardModel.check() output.
+        """
+        from denoise.guard import classify
+
+        self.stats["total"] += 1
+        start = time.perf_counter()
+
+        verdict, confidence = classify(content)
+
+        if verdict != "escalate":
+            latency_ms = (time.perf_counter() - start) * 1000
+            tier = "tier1" if confidence >= 0.95 else "tier2"
+            self.stats[tier] += 1
+            return GuardResult(
+                safe=(verdict == "safe"),
+                raw_response=f"tiered:{verdict} (conf={confidence:.3f}, tier={tier})",
+                category=None if verdict == "safe" else "classifier",
+                latency_ms=round(latency_ms, 1),
+            )
+
+        # Escalate to full LLM guard
+        self.stats["escalated"] += 1
+        return self.guard_model.check(content, prompt)
+
+    def summary(self) -> dict:
+        """Return tier distribution stats."""
+        total = self.stats["total"]
+        if total == 0:
+            return self.stats
+        return {
+            **self.stats,
+            "classifier_handled_pct": round(
+                (self.stats["tier1"] + self.stats["tier2"]) / total * 100, 1
+            ),
+            "escalation_pct": round(self.stats["escalated"] / total * 100, 1),
+        }
+
+
 # Llama Guard 3 safety categories for reference
 GUARD_CATEGORIES = {
     "S1": "Violent Crimes",
