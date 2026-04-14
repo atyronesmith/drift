@@ -158,6 +158,26 @@ For a run that loops 5 times (16 LLM calls), the same calculation gives ~14s of 
 
 **Open question**: No published study quantifies the ratio of safety-compute to productive-compute across a complete agentic workflow including all layers. The data exists in fragments but has not been aggregated.
 
+### Case Study: AAP Log Triage Pipeline
+
+The [Red Hat AI Quickstart for Ansible log analysis](https://docs.redhat.com/en/learn/ai-quickstarts/rh-ansible-log-analysis) implements a 4-stage LangGraph pipeline for triaging Ansible Automation Platform failures:
+
+| Stage | Type | Latency | Tokens (in+out) | Purpose |
+|-------|------|---------|-----------------|---------|
+| Embed & Cluster | Classifier | 200ms | 0 | Sentence-transformers + FAISS grouping |
+| LLM Summarize | LLM call | 500ms | 2,050 | Structured `[Error Type]: [description]` |
+| LLM Classify | LLM call | 300ms | 560 | Assign to 1 of 7 expert roles |
+| LLM Router | LLM call | 200ms | 370 | Decide if more context needed |
+| **LLM Solve** | **Productive** | **~2,000ms** | **~2,500** | **Step-by-step remediation** |
+
+Three of four LLM calls are overhead — the productive work is solution generation. The summarization prompt extracts structured fields from semi-structured log text (a pattern drift's hybrid extraction handles well). The classification prompt maps to 7 categories via keyword matching. The router is a binary decision.
+
+**Drift hybrid optimization target**: Replace stages 2–4 with deterministic rules (regex summarization, keyword classification, rule-based routing). Expected result: **75% LLM call reduction**, 1,000ms latency savings, ~3,000 fewer tokens per log cluster. Add denoise pre-digestion for a further ~65% input token reduction before the remaining LLM call.
+
+If enterprise safety guards are added to each LLM call (as production deployments require), the overhead compounds: 4 LLM calls × 2 guards each = 8 additional safety checks per cluster. The drift hybrid version reduces this to 1 LLM call × 2 guards = 2 safety checks — a 75% reduction in safety overhead as well.
+
+The repository includes 101 real failed AAP job logs with secrets pre-redacted, providing a ready-made corpus for empirical measurement.
+
 ## The Economics
 
 ### The cost of not having safety
