@@ -401,6 +401,18 @@ Input pre-digestion (83% token reduction on Ansible logs) reduces what the safet
 
 This is more than a performance optimization — it's a safety improvement. Large inputs (100KB+ logs) caused the productive LLM to fail 40% of the time (ignoring instructions, producing rambling narratives). Pre-digestion eliminated these failures entirely. A safety layer evaluating the focused pre-digested output is checking higher-quality content and is less likely to false-reject.
 
+**Experiment 19 validated this on OpenShift pod logs.** We ran a realistic noisy pod log (166 lines of `oc logs` output — health checks, leader election renewals, informer sync, managedFields YAML, throttling, TLS noise) through denoise's must-gather pre-digester, then compared raw vs pre-digested triage quality using qwen2.5:32b.
+
+| Metric | Raw | Pre-digested | Delta |
+|--------|-----|-------------|-------|
+| Input tokens | ~2,165 | ~740 | **-65.8%** |
+| Mean latency | 100.5s | 70.0s | **-30.3%** |
+| Functional tests passed | 11/13 (84.6%) | 13/13 (100%) | **+15.4%** |
+
+The raw input was only ~2K tokens — well within context limits — yet the LLM consistently missed two findings across all 3 runs: it failed to identify the CrashLoopBackOff state and missed the pod eviction consequence of the node failure. With noise removed, both were found every time. This demonstrates that noise impact is not just about context overflow — it's about attention dilution. Irrelevant lines (health checks, leader election) compete for the model's focus and degrade reasoning even on short inputs.
+
+For safety evaluation specifically, this means pre-digesting inputs before guard checks produces both faster and more accurate results — the guard evaluates a cleaner signal with fewer distractors. Pre-digestion is not in tension with safety; it strengthens it.
+
 ### Model upgrades are safety events
 
 Upgrading from Qwen2.5:32b to Qwen3:30b on identical hardware dropped functional equivalence from **100% to 0%** on the iterative_refactor task. Qwen3 consistently missed a password exposure fix that Qwen2.5 catches every time. This is not drift — it's a model capability regression.
@@ -529,7 +541,51 @@ The classifier's 81.5% accuracy on this dataset is not a limitation — it refle
 
 For production safety pipelines running 15-290 checks per pipeline run, replacing the LLM guard's content classification with a tiered classifier at content-safe checkpoints eliminates the latency and cost of LLM inference for checks that produce no signal. The LLM guard remains appropriate for genuinely ambiguous content — but on software engineering workloads, that is 0% of outputs at the 0.90 confidence threshold.
 
-**Methodology**: `scripts/probe_guard_logprobs.py` called Llama Guard 3-1B via Ollama with `"logprobs": True, "top_logprobs": 5`, extracting P(safe) and P(unsafe) from the first token's logprob distribution. Entropy calculated as Shannon entropy of the binary distribution. Classifier trained with `scripts/train_guard_classifier.py` using scikit-learn LogisticRegression with 5-fold stratified CV, weights exported to `results/guard_classifier/` for zero-dependency pure-Python inference. Guard runtime module: [denoise](https://github.com/atyronesmith/drift) sibling repo at `../denoise/src/denoise/guard.py` — see denoise's `docs/GUARD.md` for usage and integration docs.
+**Methodology**: `scripts/probe_guard_logprobs.py` called Llama Guard 3-1B via Ollama with `"logprobs": True, "top_logprobs": 5`, extracting P(safe) and P(unsafe) from the first token's logprob distribution. Entropy calculated as Shannon entropy of the binary distribution. Classifier trained with `scripts/train_guard_classifier.py` using scikit-learn LogisticRegression with 5-fold stratified CV, weights exported to `results/guard_classifier/` for zero-dependency pure-Python inference. Guard runtime module: denoise sibling repo at `../denoise/src/denoise/guard.py` — see denoise's `docs/GUARD.md` for usage and integration docs.
+
+### CodeShield vs Llama Guard: static analysis finds what LLM guards miss (and vice versa)
+
+We ran Meta's CodeShield static analyzer on the same 224 outputs that Llama Guard evaluated, providing the first direct comparison between an LLM-based content guard and a deterministic static analysis tool on identical software engineering outputs.
+
+**CodeShield found zero security vulnerabilities across 144 code-containing outputs.** No CWEs, no insecure patterns, no flagged code — the LLM-generated code in drift's corpus is clean.
+
+| | CodeShield | Llama Guard |
+|---|---|---|
+| Outputs flagged | **0** (0%) | **114** (50.9%) |
+| True positives | 0 | 0 |
+| False positives | 0 | 114 |
+| Mean latency | 235ms | 290ms |
+
+The confusion matrix against the 224 matched outputs:
+
+| | Guard Safe | Guard Unsafe |
+|---|---|---|
+| **CodeShield Clean** | 110 | 114 |
+| **CodeShield Flagged** | 0 | 0 |
+
+All 114 guard flags are confirmed false positives — CodeShield's static analysis found no actual CWE in any output the guard rejected. The guard was not detecting security vulnerabilities; it was classifying code as "specialized advice" (S6) or "intellectual property" (S8).
+
+**Per-step comparison reveals the mismatch:**
+
+| Step | CodeShield Flag Rate | Llama Guard Flag Rate |
+|------|---------------------|----------------------|
+| implementer (code gen) | 0% | 94.7% |
+| baseline | 0% | 81.8% |
+| hybrid | 0% | 80.0% |
+| reviewer | 0% | 14.3% |
+| verifier | 0% | 25.9% |
+
+The guard rejects 95% of code generation outputs that CodeShield confirms are clean. These are not borderline cases — the tools are measuring entirely different things. CodeShield checks for CWEs (weak crypto, injection, hardcoded secrets). Llama Guard checks for content policy violations (harmful advice, IP concerns). For software engineering workloads, the content policy categories are systematically misaligned.
+
+**The cost implication is significant.** In a production pipeline running both tools:
+- CodeShield adds ~235ms of CPU-only static analysis and produces actionable CWE reports (none in this corpus, but would catch real issues like MD5 usage, SQL injection patterns, hardcoded credentials).
+- Llama Guard adds ~290ms of GPU inference and produces coin-flip content classifications that reject 95% of legitimate code outputs.
+
+For code safety specifically, CodeShield is the correct tool: deterministic, no false positives on clean code, no GPU required, and it detects actual vulnerability patterns rather than content policy categories. The LLM guard adds no security value beyond what static analysis provides for code outputs, while imposing a 95% false rejection rate.
+
+**What CodeShield does not catch**: logic bugs, capability regressions, data corruption, or semantic errors — the actual threats drift has measured (3.3% bug rate in Experiment 3, 100% → 0% regression in Experiment 14). No safety tool in the current ecosystem — LLM-based or static — detects these. Functional testing (drift's approach) remains the only method.
+
+**Methodology**: `scripts/codeshield_audit.py` extracted fenced code blocks from all 224 unique outputs, ran each through CodeShield's async `scan_code()` API (which uses both regex rules and Semgrep), and cross-referenced results with Llama Guard verdicts from `results/safety_audit.json`. Results saved to `results/codeshield_audit.json`.
 
 ### Attention analysis reveals limits of keyword-based safety
 
