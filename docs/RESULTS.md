@@ -1272,3 +1272,47 @@ LLM handles remaining 3 fields: `current_status`, `meaning`, `key_insight`.
 4. **Output format determines optimization ceiling.** JSON with named fields → high automation potential. Free-form markdown → near-zero. This reinforces the finding from Experiment 17: structured output is prerequisite for hybrid optimization.
 
 5. **Existing deterministic handling validates drift's approach.** The observability summarizer's `DeterministicChatBot` and `select_queries_directly()` are hand-written versions of what drift automates. Drift's probe independently confirms which fields are deterministic, providing empirical validation for their design decisions.
+
+## Experiment 19: Must-Gather Pre-digestion Validation
+
+**Date**: 2026-04-13
+
+**Goal**: Validate the denoise must-gather pre-digester on a pod log triage task — measure token savings, latency reduction, and whether pre-digestion preserves (or improves) LLM output quality.
+
+### Setup
+
+- **Task**: `pod_log_triage` — SRE analysis of noisy OpenShift pod logs
+- **Input**: 166-line simulated `oc logs` output with 3 error clusters (OOMKilled/CrashLoopBackOff, GPU memory fragmentation/CUDA OOM, node NotReady/pod eviction) buried in health checks, leader election renewals, informer sync, managedFields YAML, throttling, and TLS noise
+- **Pre-digester**: `denoise.mustgather.predigest()` — line classification, block collapsing, blob truncation
+- **Model**: qwen2.5:32b at temperature=0
+- **Runs**: 3 per variant (raw vs pre-digested)
+- **Functional tests**: 13 (8 extractable, 5 reasoning)
+
+### Pre-digestion Effect
+
+| Metric | Raw | Pre-digested | Delta |
+|--------|-----|-------------|-------|
+| Lines | 166 | 46 | -72.3% |
+| Characters | 8,663 | 2,963 | -65.8% |
+| Est. tokens | 2,165 | 740 | **-65.8%** |
+
+The pre-digester collapsed health check lines into `[HEALTH CHECKS: N lines, all OK]`, leader election renewals into `[LEADER ELECTION: N renewals]`, managedFields YAML into `[MANAGED FIELDS: block omitted]`, and stripped informer/throttling/TLS noise. All three error clusters were preserved intact with surrounding context.
+
+### Results
+
+| Metric | Raw | Pre-digested | Delta |
+|--------|-----|-------------|-------|
+| Mean latency | 100.5s | 70.0s | **-30.3%** |
+| Functional tests | 11/13 (84.6%) | 13/13 (100%) | **+15.4%** |
+| `mentions_crashloopbackoff` | 0% | 100% | +100% |
+| `eviction_consequence` | 0% | 100% | +100% |
+
+### Key Findings
+
+1. **Pre-digestion improves quality, not just speed.** Raw logs failed 2 tests consistently across all 3 runs: the LLM missed the CrashLoopBackOff reference and the pod eviction consequence when processing 166 lines of noisy input. With noise removed, the LLM found both — 100% pass rate on all 13 tests.
+
+2. **65.8% token savings on realistic pod logs.** The must-gather domain has high noise density: health checks, leader election, and YAML metadata account for the majority of lines. This matches the entropy pre-flight prediction (must-gather corpus redundancy >60% → "high" impact).
+
+3. **30.3% latency reduction.** Smaller than hybrid execution (39-92%) but significant — and this is pure input preprocessing with zero accuracy loss. The two techniques are complementary.
+
+4. **Noise degrades LLM reasoning on long contexts.** The raw input is only ~2K tokens — well within context limits — yet the LLM still missed 2/13 findings. This suggests noise impact is not just about context overflow but about attention dilution: irrelevant lines compete for the model's focus on the actual errors.

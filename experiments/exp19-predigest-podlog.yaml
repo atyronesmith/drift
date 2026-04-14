@@ -1,0 +1,8 @@
+experiment:
+  name: exp19-predigest-podlog
+  model: qwen2.5:32b
+  temperature: 0
+  task: pod_log_triage
+
+  system_prompt_file: podlog_system.md
+  user_prompt_file: podlog_user.md
