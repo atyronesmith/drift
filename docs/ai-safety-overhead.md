@@ -549,7 +549,7 @@ Mean entropy across all 224 outputs: **0.94 bits** — 94% of the theoretical ma
 
 Unsafe classifications are *less* confident than safe ones — the guard is closer to a coin flip when it rejects than when it accepts.
 
-This reframes the false positive finding. The 47.8% rejection rate is not the guard making confident wrong decisions — it is making essentially random decisions that happen to land on "unsafe" roughly half the time. Every safety check in the pipeline (3 minimum, 15-290 in production models) is consuming ~1,500 input tokens and ~290ms of GPU inference to produce a coin-flip verdict.
+This reframes the false positive finding. The 47.8% rejection rate is not the guard making confident wrong decisions — it is making essentially random decisions that happen to land on "unsafe" roughly half the time. Every safety check in the pipeline (3 minimum, 15-365 in production models) is consuming ~1,500 input tokens and ~290ms of GPU inference to produce a coin-flip verdict.
 
 **The tiered alternative.** We trained a logistic regression classifier on the same 224 outputs using 203 features (200 bag-of-words + 3 structural indicators). At a 0.90 confidence threshold:
 
@@ -559,7 +559,7 @@ This reframes the false positive finding. The 47.8% rejection rate is not the gu
 
 The classifier's 81.5% accuracy on this dataset is not a limitation — it reflects the dataset. The guard itself achieves ~50% effective accuracy (coin-flip confidence), so a classifier matching the guard's decisions 81.5% of the time is faithfully reproducing a noisy signal. The classifier's value is not higher accuracy; it is that **it knows when it doesn't know**. When it reports 0.95 confidence, that confidence is calibrated. When the LLM guard reports "unsafe", it is reporting a coin-flip decision as a categorical assertion.
 
-For production safety pipelines running 15-290 checks per pipeline run, replacing the LLM guard's content classification with a tiered classifier at content-safe checkpoints eliminates the latency and cost of LLM inference for checks that produce no signal. The LLM guard remains appropriate for genuinely ambiguous content — but on software engineering workloads, that is 0% of outputs at the 0.90 confidence threshold.
+For production safety pipelines running 15-365 checks per pipeline run, replacing the LLM guard's content classification with a tiered classifier at content-safe checkpoints eliminates the latency and cost of LLM inference for checks that produce no signal. The LLM guard remains appropriate for genuinely ambiguous content — but on software engineering workloads, that is 0% of outputs at the 0.90 confidence threshold.
 
 **Methodology**: `scripts/probe_guard_logprobs.py` called Llama Guard 3-1B via Ollama with `"logprobs": True, "top_logprobs": 5`, extracting P(safe) and P(unsafe) from the first token's logprob distribution. Entropy calculated as Shannon entropy of the binary distribution. Classifier trained with `scripts/train_guard_classifier.py` using scikit-learn LogisticRegression with 5-fold stratified CV, weights exported to `results/guard_classifier/` for zero-dependency pure-Python inference. Guard runtime module: denoise sibling repo at `../denoise/src/denoise/guard.py` — see denoise's `docs/GUARD.md` for usage and integration docs.
 
@@ -613,7 +613,7 @@ Drift's attention weight analysis (MLX, 50 tickets) found that classification fi
 
 This has a direct safety implication: keyword-based guardrails (blocklists, regex filters) cannot detect harmful classification because the model's reasoning is holistic, not keyword-driven. A guardrail that blocks "DELETE" can prevent a harmful SQL statement, but a guardrail that blocks individual words cannot prevent a harmful classification decision because no single word drives the decision.
 
-### Security model comparison: production guard overhead is 5-19x what we measured
+### Security model comparison: production guard overhead is 5-24x what we measured
 
 Our empirical audit measured 1 output check per step — the absolute minimum deployment. Production multi-agent systems deploy guards at every trust boundary: input, output, tool calls, tool responses, inter-agent communication, and audit logging.
 
@@ -626,7 +626,7 @@ Drift's `safety-overhead` command (`drift safety-overhead`) projects guard overh
 | Drift Baseline (output only) | 3 | 3 | 0 | 0.9s | $3,000 |
 | Meta LlamaFirewall | 10 | 6 | 4 | 2.1s | $6,040 |
 | Microsoft Azure Foundry | 17 | 9 | 8 | 2.4s | $9,080 |
-| FINOS Regulated FSI | 40 | 6 | 34 | 2.1s | $6,340 |
+| FINOS Regulated FSI | 55 | 6 | 49 | 2.1s | $6,490 |
 
 **5-iteration iterative pipeline with tool calls:**
 
@@ -635,15 +635,15 @@ Drift's `safety-overhead` command (`drift safety-overhead`) projects guard overh
 | Drift Baseline | 15 | 15 | 0 | 4.3s | $15,000 |
 | Meta LlamaFirewall | 50 | 30 | 20 | 10.5s | $30,200 |
 | Microsoft Azure Foundry | 130 | 60 | 70 | 16.6s | $60,700 |
-| FINOS Regulated FSI | 290 | 45 | 245 | 14.9s | $47,450 |
+| FINOS Regulated FSI | 365 | 45 | 320 | 15.3s | $48,200 |
 
 Key findings from the comparison:
 
-1. **LLM-based checks dominate latency.** FINOS has the most total checks (290) but not the highest latency — 85% of its checks are deterministic (crypto verification, policy-as-code, schema validation) running in microseconds. Microsoft's model has fewer total checks (130) but more LLM-based ones (60), making it the most expensive.
+1. **LLM-based checks dominate latency.** FINOS has the most total checks (365) but not the highest latency — 88% of its checks are deterministic (crypto verification, policy-as-code, schema validation, memory isolation, resource quotas) running in microseconds. Microsoft's model has fewer total checks (130) but more LLM-based ones (60), making it the most expensive.
 
-2. **The architectures guard different things.** LlamaFirewall focuses on the LLM interaction (input classifier + output auditor + code analysis). Microsoft adds tool-call and tool-response checkpoints. FINOS adds inter-agent trust verification, immutable audit trails (SOX/SR 11-7 compliance), DLP scanning for MNPI leakage, and cryptographic decision binding — controls driven by financial regulation, not just content safety.
+2. **The architectures guard different things.** LlamaFirewall focuses on the LLM interaction (input classifier + output auditor + code analysis). Microsoft adds tool-call and tool-response checkpoints. FINOS adds inter-agent trust verification, immutable audit trails (SOX/SR 11-7 compliance), DLP scanning for MNPI leakage, cryptographic decision binding, memory isolation (context window poisoning, cross-session leakage), and evaluation feedback integrity — controls driven by financial regulation, not just content safety. The April 2026 FINOS threat model defines 43 threats across 11 layers; our model covers 21 of 36 controls as per-request checkpoints (the remaining 15 are infrastructure-level: MFA, WAF, SBOM, secrets management, network segmentation, etc.).
 
-3. **The cost driver is LLM inference, not security controls.** Replacing LLM-based content filters (~290ms each) with classifier-based alternatives (~19ms for PromptGuard 2, ~50ms for DLP) would reduce FINOS latency from 14.9s to ~4s for the iterative pipeline — a 73% reduction. The 245 deterministic checks add less than 0.5s total.
+3. **The cost driver is LLM inference, not security controls.** Replacing LLM-based content filters (~290ms each) with classifier-based alternatives (~19ms for PromptGuard 2, ~50ms for DLP) would reduce FINOS latency from 15.3s to ~4s for the iterative pipeline — a 74% reduction. The 320 deterministic checks add less than 0.5s total.
 
 4. **No model catches what actually matters for code.** All four models run content safety classification (violence, hate, self-harm categories). None detect logic bugs, capability regressions, or data corruption — the actual threats in software engineering pipelines. CodeShield (static analysis, ~50ms) is the closest, but it catches known vulnerability patterns, not novel logic errors.
 

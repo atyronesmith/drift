@@ -163,6 +163,27 @@ def project_overhead(model: SecurityModel, pipeline: PipelineShape) -> OverheadP
         total_checks += count
         total_latency += latency
 
+    # Memory and evaluation checks (fire once per step)
+    for cp_name in ("memory", "evaluation"):
+        checks = model.checkpoints.get(cp_name, [])
+        if checks:
+            count = len(checks) * pipeline.steps
+            latency = sum(c.latency_ms for c in checks) * pipeline.steps
+            for c in checks:
+                if c.type == "llm":
+                    llm_checks += pipeline.steps
+                else:
+                    deterministic_checks += pipeline.steps
+            breakdown.append({
+                "checkpoint": cp_name,
+                "checks_per_step": len(checks),
+                "total_checks": count,
+                "latency_ms": latency,
+                "guards": [c.name for c in checks],
+            })
+            total_checks += count
+            total_latency += latency
+
     # Audit/observability checks (fire once per step)
     checks = model.checkpoints.get("audit", [])
     if checks:
