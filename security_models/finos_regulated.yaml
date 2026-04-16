@@ -2,10 +2,12 @@ name: FINOS Multi-Agent (Regulated FSI)
 version: "2026-04"
 description: >
   FINOS AI Reference Architecture for multi-agent systems in regulated
-  financial services. 36 controls across 9 layers, 7 trust boundaries.
-  Includes FSI-specific requirements: immutable audit trails (SOX/SR 11-7),
-  MNPI leakage prevention, cryptographic decision binding, mandatory
-  human sign-off for high-risk operations.
+  financial services. 36 controls across 11 layers (8 architectural +
+  evaluation + observability + cross-layer FSI), 43 threats, 7 trust
+  boundaries. Includes FSI-specific requirements: immutable audit trails
+  (SOX/SR 11-7), MNPI leakage prevention, cryptographic decision binding,
+  mandatory human sign-off for high-risk operations, memory isolation,
+  and evaluation feedback integrity.
 source: https://github.com/finos-labs/ai-reference-architecture-library/tree/main/Library/reference-architecture/multi-agent
 
 checkpoints:
@@ -92,6 +94,32 @@ checkpoints:
       latency_ms: 5
       type: classifier
       description: Agent coordination/collusion anomaly detection
+
+  # Memory controls — context window and long-term memory integrity
+  memory:
+    - name: context_window_validation
+      latency_ms: 10
+      type: classifier
+      description: "C33/C2: Scan context window for injection/poisoning artifacts"
+    - name: memory_isolation
+      latency_ms: 1
+      type: deterministic
+      description: "C34: Cross-session memory isolation, cryptographic binding"
+    - name: knowledge_source_validation
+      latency_ms: 5
+      type: deterministic
+      description: "C18: Validate knowledge source provenance and integrity"
+
+  # Evaluation controls — feedback integrity and supervision enforcement
+  evaluation:
+    - name: feedback_validation
+      latency_ms: 5
+      type: classifier
+      description: "C27: Multi-source feedback aggregation and trust scoring"
+    - name: resource_quota_enforcement
+      latency_ms: 0.1
+      type: deterministic
+      description: "C22: Per-request resource quota enforcement (CPU, memory, time)"
 
   # FINOS-specific: observability controls that add per-request latency
   audit:
