@@ -54,8 +54,8 @@ drift compare <path_a> <path_b>
 
 ### Safety
 - `src/drift/safety/guard.py` — `GuardModel` (Llama Guard on Ollama via curl), `TieredGuard` (classifier-first, escalate to LLM guard).
-- `src/drift/safety/classifier.py` — Tiered safe/unsafe classification: keyword scan (Tier 1) + logistic regression (Tier 2) + escalation (Tier 3). Moved here from denoise.
-- `src/drift/safety/monitor.py` — JSD-based classifier drift detection. `ClassifierMonitor` tracks confidence distributions at runtime. Moved here from denoise.
+- `src/drift/safety/classifier.py` — Tiered safe/unsafe classification: keyword scan (Tier 1) + logistic regression (Tier 2) + escalation (Tier 3). Moved here from logdigest.
+- `src/drift/safety/monitor.py` — JSD-based classifier drift detection. `ClassifierMonitor` tracks confidence distributions at runtime. Moved here from logdigest.
 - `src/drift/safety/models.py` — Security model definitions and overhead projection.
 - `scripts/train_guard_classifier.py` — Trains the Tier 2 logistic regression, exports weights to `results/guard_classifier/`.
 - `scripts/safety_audit.py` — Batch audit of saved results against guard models.
@@ -85,9 +85,9 @@ Each task lives in `tasks/<name>/` with `input.md`, prompt files, and `functiona
 
 ## Relationship to Denoise
 
-Denoise (sibling repo at `../denoise`) is the runtime pre-digestion library. Drift trains, experiments, and validates.
+logdigest (sibling repo at `../denoise`) is the runtime pre-digestion library. Drift trains, experiments, and validates.
 
-- Drift experiments validate denoise's pre-digestion effectiveness
-- `drift discover` (planned) will generate pattern sets for denoise from log corpora
-- Guard classification and drift monitoring live here in `src/drift/safety/`, not in denoise
+- Drift experiments validate logdigest's pre-digestion effectiveness
+- `drift discover` (planned) will generate pattern sets for logdigest from log corpora
+- Guard classification and drift monitoring live here in `src/drift/safety/`, not in logdigest
 - Classifier weights are trained here (`scripts/train_guard_classifier.py`) and loaded by `drift.safety.classifier`
