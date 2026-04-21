@@ -148,7 +148,7 @@ For applications with large, noisy inputs (logs, traces, documents), determinist
 - **Level 2** — Deduplicate repeated patterns (retry loops, item iterations) into compact descriptors
 - **Level 3** — Compress known verbose structures (API responses, stack traces) into one-line summaries
 
-This is domain-specific but automatable. The patterns are learned from corpus analysis, not hand-coded per log format.
+This is domain-specific. The current patterns are hand-authored by domain experts examining log samples, validated against 500+ logs per domain. Automated pattern discovery from corpus entropy analysis is planned — see denoise's `docs/PATTERN_GENERATION.md` for the pipeline design.
 
 ### 3.3 Classifier Distillation
 
