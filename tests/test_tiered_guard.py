@@ -48,8 +48,8 @@ def mock_guard_model():
 @pytest.fixture
 def tiered_guard(mock_guard_model, weights_file, keywords_file):
     """Create a TieredGuard with mocked LLM guard."""
-    # Reset denoise guard module state before each test
-    import denoise.guard as dg
+    # Reset classifier module state before each test
+    import drift.safety.classifier as dg
     dg._LOADED = False
     guard = TieredGuard(mock_guard_model, weights_file, keywords_file)
     return guard
@@ -115,7 +115,7 @@ def test_tiered_guard_escalation_uses_llm(tiered_guard, mock_guard_model):
         safe=False, raw_response="unsafe\nS1", category="S1", latency_ms=200.0,
     )
     # Force escalation by resetting weights to trigger low confidence
-    import denoise.guard as dg
+    import drift.safety.classifier as dg
     dg._LOADED = False  # classify returns ("escalate", 0.0) when not loaded
 
     result = tiered_guard.check("some content")

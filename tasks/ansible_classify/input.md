@@ -1,1 +1,1 @@
-{input}
+Permission Error: User 'system:serviceaccount:showroom-deployer:showroom-deployer' cannot get resource 'projects' in API group 'project.openshift.io' in the namespace 'showroom-demo01', resulting in a 403 Forbidden error during the ocp4_workload_showroom role execution.
