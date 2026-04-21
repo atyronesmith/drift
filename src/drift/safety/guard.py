@@ -128,9 +128,9 @@ class GuardModel:
 
 
 class TieredGuard:
-    """Tiered safety guard: denoise classifier first, LLM guard on escalation.
+    """Tiered safety guard: classifier first, LLM guard on escalation.
 
-    Uses denoise.guard.classify() for fast Tier 1/2 classification.
+    Uses drift.safety.classifier.classify() for fast Tier 1/2 classification.
     Only escalates to the full LLM guard (GuardModel) when the classifier
     confidence is below threshold. Tracks per-tier statistics.
     """
@@ -144,7 +144,7 @@ class TieredGuard:
         self.guard_model = guard_model
         self.stats = {"tier1": 0, "tier2": 0, "escalated": 0, "total": 0}
 
-        from denoise.guard import load_weights
+        from drift.safety.classifier import load_weights
         load_weights(weights_path, keywords_path)
 
     def check(self, content: str, prompt: str = "") -> GuardResult:
@@ -156,7 +156,7 @@ class TieredGuard:
         Returns:
             GuardResult compatible with GuardModel.check() output.
         """
-        from denoise.guard import classify
+        from drift.safety.classifier import classify
 
         self.stats["total"] += 1
         start = time.perf_counter()

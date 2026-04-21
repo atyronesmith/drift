@@ -2,7 +2,7 @@
 """Train a guard classifier on Llama Guard labels for tiered guard escalation.
 
 Trains a logistic regression classifier on safe/unsafe labels from the guard
-logprobs data. Exports compiled weights for use in denoise's guard.py module.
+logprobs data. Exports compiled weights for use in drift.safety.classifier.
 
 Input: results/guard_logprobs.json (from probe_guard_logprobs.py)
 Output: results/guard_classifier_weights.json — vocabulary, weights, bias
@@ -133,7 +133,7 @@ def build_features(contents: list[str], vocab_size: int = 200):
 
 
 def pure_python_predict(weights, bias, features, classes):
-    """Logistic regression in pure Python — must match denoise/guard.py exactly."""
+    """Logistic regression in pure Python — must match drift/safety/classifier.py exactly."""
     n_classes = len(classes)
     logits = []
     for c in range(n_classes):

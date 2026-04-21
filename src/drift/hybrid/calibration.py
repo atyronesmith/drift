@@ -1,9 +1,9 @@
 """Baseline confidence distribution computation for classifier drift detection.
 
 During training (drift distill), computes per-classifier confidence
-distributions and serializes them as baselines. At runtime, denoise's
-ClassifierMonitor compares live predictions against these baselines
-using Jensen-Shannon divergence.
+distributions and serializes them as baselines. At runtime,
+drift.safety.monitor.ClassifierMonitor compares live predictions
+against these baselines using Jensen-Shannon divergence.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def compute_baseline(
 
     Runs the classifier over all training inputs and builds a histogram
     of top-class confidence values. This histogram is the baseline that
-    denoise monitors for drift via JSD.
+    drift.safety.monitor monitors for drift via JSD.
 
     Args:
         weights: Classifier weight matrix [n_classes x n_features]
