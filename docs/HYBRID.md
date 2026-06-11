@@ -454,7 +454,7 @@ The one outlier (High + Account → P3) was a ticket about configuring MFA -- ar
 
 **Implication**: multi-ticket probing can discover conditional rules that single-ticket entropy misses. A field that looks like "reasoning" on one ticket may collapse to a lookup table across many tickets. This is a path to extracting even more fields from the LLM.
 
-See [ATTENTION_PLAN.md](ATTENTION_PLAN.md) for a deeper approach: using transformer attention weights to trace which input tokens drive output decisions, enabling discovery of non-obvious conditional mappings.
+See [design/ATTENTION_PLAN.md](design/ATTENTION_PLAN.md) for a deeper approach: using transformer attention weights to trace which input tokens drive output decisions, enabling discovery of non-obvious conditional mappings.
 
 ### Edge Case: Confident Reasoning
 
