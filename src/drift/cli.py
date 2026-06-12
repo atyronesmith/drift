@@ -915,6 +915,82 @@ def probe(config_path: str, output: str | None, top_logprobs: int, rules: bool, 
         click.echo(f"\nProbe data saved to {output}")
 
 
+@cli.command(name="probe-hidden")
+@click.argument("config_path", type=click.Path(exists=True))
+@click.option("--output", "-o", default=None, help="Save hidden-state result to JSON.")
+@click.option("--layers", default="all",
+              help='Layers to capture: "all" or comma-separated indices (e.g. "20,38").')
+@click.option("--positions", default="last_input",
+              help='Positions: "last_input", "all_input", or comma-separated indices.')
+@click.option("--server-url", default=None,
+              help="Drift MLX server URL (default: DRIFT_MLX_URL or http://localhost:8080).")
+@click.option("--local", "use_local", is_flag=True,
+              help="Load the MLX model in-process instead of using the server.")
+@click.option("--model", "model_override", default=None,
+              help="MLX model ID for --local mode (default: from config or Qwen2.5-32B-4bit).")
+@click.option("--input", "input_path", default=None, type=click.Path(exists=True),
+              help="Override input text with this file (for batch experiments).")
+def probe_hidden(config_path: str, output: str | None, layers: str, positions: str,
+                 server_url: str | None, use_local: bool, model_override: str | None,
+                 input_path: str | None):
+    """Capture hidden states (residual stream) for a baseline experiment.
+
+    Prefill-only: one forward pass over the input, no generation. The
+    captured vectors feed Tier 4 linear-probe training and runtime.
+    """
+    config = yaml.safe_load(Path(config_path).read_text())
+    config = resolve_task_prompts(config, Path.cwd() / "tasks")
+    exp = config["experiment"]
+
+    if input_path:
+        exp["input"] = Path(input_path).read_text()
+
+    if exp.get("type") == "pipeline":
+        click.echo("Error: probe-hidden only supports baseline experiments.", err=True)
+        sys.exit(1)
+
+    system = exp["system_prompt"]
+    prompt = exp["user_prompt"]
+    if "input" in exp:
+        prompt = prompt.replace("{input}", exp["input"])
+
+    layer_spec = layers if layers == "all" else [int(x) for x in layers.split(",")]
+    pos_spec = positions if positions in ("last_input", "all_input") \
+        else [int(x) for x in positions.split(",")]
+
+    click.echo(f"Probing hidden states: {exp['name']}")
+    click.echo(f"Layers: {layers}  Positions: {positions}")
+
+    import time as _time
+    t0 = _time.perf_counter()
+    if use_local:
+        from drift.probing.mlx_hidden import probe_hidden_states
+        model = model_override or "mlx-community/Qwen2.5-32B-Instruct-4bit"
+        result = probe_hidden_states(
+            system=system, prompt=prompt, model=model,
+            layers=layer_spec, positions=pos_spec, prefill_only=True,
+        )
+    else:
+        from drift.probing.mlx_hidden import probe_hidden_remote
+        result = probe_hidden_remote(
+            system=system, prompt=prompt, base_url=server_url,
+            layers=layer_spec, positions=pos_spec, prefill_only=True,
+        )
+    elapsed_ms = (_time.perf_counter() - t0) * 1000
+
+    n_vecs = sum(len(by_pos) for by_pos in result.states.values())
+    dim = len(next(iter(next(iter(result.states.values())).values()))) if n_vecs else 0
+    click.echo(f"Model: {result.model}")
+    click.echo(f"Input tokens: {result.n_input}")
+    click.echo(f"Captured: {len(result.layers)} layers x {len(result.positions)} positions "
+               f"({n_vecs} vectors, d_model={dim})")
+    click.echo(f"Prefill time: {elapsed_ms:,.0f} ms")
+
+    if output:
+        Path(output).write_text(json.dumps(result.to_dict(), indent=2))
+        click.echo(f"\nHidden-state data saved to {output}")
+
+
 @cli.command()
 @click.argument("probe_path", type=click.Path(exists=True))
 @click.option("--input", "input_path", required=True, type=click.Path(exists=True),

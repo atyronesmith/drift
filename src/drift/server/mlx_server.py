@@ -125,6 +125,8 @@ class DriftMLXHandler(BaseHTTPRequestHandler):
                 self._handle_logprobs()
             elif self.path == "/v1/attention":
                 self._handle_attention()
+            elif self.path == "/v1/hidden":
+                self._handle_hidden()
             else:
                 self._send_json({"error": f"Unknown path: {self.path}"}, 404)
         except Exception as e:
@@ -257,6 +259,30 @@ class DriftMLXHandler(BaseHTTPRequestHandler):
         })
 
 
+    def _handle_hidden(self):
+        """Hidden-state (residual stream) probing. Prefill-only by default."""
+        from drift.probing.mlx_hidden import _probe_hidden_with_model
+
+        data = self._read_json()
+        system, user = self._parse_messages(data)
+
+        t0 = time.perf_counter()
+        result = _probe_hidden_with_model(
+            _model, _tokenizer, system, user,
+            model_name=_model_name,
+            layers=data.get("layers", "all"),
+            positions=data.get("positions", "last_input"),
+            prefill_only=data.get("prefill_only", True),
+            max_tokens=data.get("max_tokens", 0),
+            temperature=data.get("temperature", 0),
+        )
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+
+        payload = result.to_dict()
+        payload["timing"] = {"total_ms": round(elapsed_ms, 1)}
+        self._send_json(payload)
+
+
 def start_server(model: str, host: str = "0.0.0.0", port: int = 8080,
                   log_file: str | None = None):
     """Start the drift MLX server."""
@@ -284,6 +310,7 @@ def start_server(model: str, host: str = "0.0.0.0", port: int = 8080,
     click.echo(f"  POST /v1/chat/completions  — OpenAI-compatible inference")
     click.echo(f"  POST /v1/logprobs          — full-vocab entropy probing")
     click.echo(f"  POST /v1/attention         — attention weight probing")
+    click.echo(f"  POST /v1/hidden            — hidden-state probing (prefill-only)")
     click.echo(f"  GET  /health               — server status")
     click.echo()
     click.echo(f"Press Ctrl+C to stop")
