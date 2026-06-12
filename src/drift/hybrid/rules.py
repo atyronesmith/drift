@@ -47,6 +47,8 @@ def execute_rule(rule: dict, input_text: str, extracted: dict | None = None,
         return _classifier_rule(path, rule, input_text, extracted or {})
     elif rule_type == "hidden_probe":
         return _hidden_probe_rule(path, rule, hidden_states)
+    elif rule_type == "concept_program":
+        return _concept_program_rule(path, rule, hidden_states)
     else:
         return RuleResult(path=path, value=None, matched=False)
 
@@ -285,6 +287,54 @@ def _hidden_probe_rule(path: str, rule: dict,
         escalation_hint=classes[best_idx],
         escalation_confidence=confidence,
         distribution=distribution,
+    )
+
+
+def _concept_program_rule(path: str, rule: dict,
+                          hidden_states: dict[int, list[float]] | None) -> RuleResult:
+    """Evaluate a concept-bottleneck program (auditable Tier 4 variant).
+
+    Each concept is a binary probe (sigmoid of a dot product on a hidden
+    state); the program is a shallow decision tree over the probed concept
+    probabilities. Confidence is the leaf purity from training; below the
+    threshold the field escalates with the tentative value as hint.
+
+    YAML example:
+        - path: assessment.assignment_group
+          type: concept_program
+          confidence_threshold: 0.9
+          concepts:
+            - name: is_lockout
+              layer: 38
+              weights: [...]   # d_model floats
+              bias: 0.0
+          program:
+            if: {concept: is_lockout, op: ">", threshold: 0.5}
+            then: {value: IdentityOps, confidence: 0.97, samples: 40}
+            else: {value: DeskOps, confidence: 0.85, samples: 50}
+    """
+    from drift.hybrid.concepts import eval_concept_program
+
+    if not hidden_states:
+        return RuleResult(path=path, value=None, matched=False)
+
+    concept_values = {}
+    for concept in rule["concepts"]:
+        h = hidden_states.get(concept["layer"])
+        if h is None or len(concept["weights"]) != len(h):
+            return RuleResult(path=path, value=None, matched=False)
+        z = concept["bias"] + sum(w * hv for w, hv in zip(concept["weights"], h))
+        concept_values[concept["name"]] = 1.0 / (1.0 + math.exp(-z))
+
+    value, confidence = eval_concept_program(rule["program"], concept_values)
+    threshold = rule.get("confidence_threshold", 0.95)
+
+    if confidence >= threshold:
+        return RuleResult(path=path, value=value, matched=True)
+
+    return RuleResult(
+        path=path, value=None, matched=False,
+        escalation_hint=value, escalation_confidence=confidence,
     )
 
 
