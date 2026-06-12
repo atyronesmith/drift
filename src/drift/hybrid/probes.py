@@ -46,6 +46,8 @@ def train_hidden_probe(
 
     from sklearn.linear_model import LogisticRegression
     from sklearn.model_selection import StratifiedKFold, cross_val_predict, cross_val_score
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
 
     y = np.asarray(y)
     X = np.asarray(X, dtype=np.float32)
@@ -66,28 +68,45 @@ def train_hidden_probe(
         return None
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
 
+    # Standardize inside each CV fold (raw residual-stream dims vary in scale
+    # by orders of magnitude; LR on unscaled activations underfits badly).
+    def _make(c):
+        return make_pipeline(
+            StandardScaler(),
+            LogisticRegression(max_iter=2000, C=c, random_state=seed),
+        )
+
     best_c, best_acc = None, -1.0
     for c in c_grid:
-        lr = LogisticRegression(max_iter=2000, C=c, random_state=seed)
-        acc = cross_val_score(lr, X, y, cv=skf, scoring="accuracy").mean()
+        acc = cross_val_score(_make(c), X, y, cv=skf, scoring="accuracy").mean()
         if acc > best_acc:
             best_acc, best_c = acc, c
 
     if best_acc < min_accuracy:
         return None
 
-    lr = LogisticRegression(max_iter=2000, C=best_c, random_state=seed)
-    oof_probs = cross_val_predict(lr, X, y, cv=skf, method="predict_proba")
+    oof_probs = cross_val_predict(_make(best_c), X, y, cv=skf, method="predict_proba")
 
-    lr.fit(X, y)
+    pipeline = _make(best_c)
+    pipeline.fit(X, y)
+    scaler, lr = pipeline.named_steps["standardscaler"], pipeline.named_steps["logisticregression"]
+
+    # Fold the scaler into the exported weights so the runtime stays a plain
+    # dot product: w'x' = w*(x-mu)/sigma  ->  w_folded = w/sigma,
+    # b_folded = b - w.mu/sigma
+    sigma = np.sqrt(scaler.var_) + 1e-12
+    coef_folded = lr.coef_ / sigma
+    intercept_folded = lr.intercept_ - (lr.coef_ * scaler.mean_ / sigma).sum(axis=1)
 
     return {
         "type": "hidden_probe",
         "layer": layer,
         "position": position,
         "classes": list(lr.classes_),
-        "weights": lr.coef_.tolist() if len(lr.classes_) > 2 else _binary_to_per_class(lr),
-        "bias": lr.intercept_.tolist() if len(lr.classes_) > 2 else _binary_bias_to_per_class(lr),
+        "weights": coef_folded.tolist() if len(lr.classes_) > 2
+                   else _folded_binary_to_per_class(coef_folded),
+        "bias": intercept_folded.tolist() if len(lr.classes_) > 2
+                else _folded_binary_bias_to_per_class(intercept_folded),
         "probe_model": probe_model,
         "cv_accuracy": round(float(best_acc), 4),
         "best_C": best_c,
@@ -97,18 +116,18 @@ def train_hidden_probe(
     }
 
 
-def _binary_to_per_class(lr) -> list[list[float]]:
+def _folded_binary_to_per_class(coef: np.ndarray) -> list[list[float]]:
     """sklearn binary LR stores one weight row (for classes_[1]).
 
     The hidden_probe runtime computes per-class logits + softmax, so expand
     to two rows: [-w/2, +w/2] reproduces the same decision and probabilities.
     """
-    w = lr.coef_[0]
+    w = coef[0]
     return [(-w / 2).tolist(), (w / 2).tolist()]
 
 
-def _binary_bias_to_per_class(lr) -> list[float]:
-    b = float(lr.intercept_[0])
+def _folded_binary_bias_to_per_class(intercept: np.ndarray) -> list[float]:
+    b = float(intercept[0])
     return [-b / 2, b / 2]
 
 

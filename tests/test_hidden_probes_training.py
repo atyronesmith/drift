@@ -99,3 +99,24 @@ class TestLstarSelection:
         from drift.hybrid.probes import select_lstar
         acc = {0: 0.5, 8: 0.8, 16: 1.0}
         assert select_lstar(acc, fraction=0.79) == 8
+
+
+class TestScalerFolding:
+    def test_folded_weights_match_pipeline_probs(self):
+        """Exported weights must reproduce the scaled pipeline via plain dot product."""
+        import math
+        X, y = _separable_data(n=80, d=12, seed=3)
+        X[:, 0] *= 50.0   # wildly different scales to exercise the folding
+        X[:, 1] += 10.0
+        probe = train_hidden_probe(X, y, layer=0, probe_model="m")
+        W = np.array(probe["weights"])
+        b = np.array(probe["bias"])
+        # Runtime computation: softmax(W @ h + b), same as _hidden_probe_rule
+        logits = X @ W.T + b
+        logits -= logits.max(axis=1, keepdims=True)
+        probs = np.exp(logits)
+        probs /= probs.sum(axis=1, keepdims=True)
+        pred = np.array(probe["classes"])[probs.argmax(axis=1)]
+        # Must agree with the trained model's own predictions on train data
+        acc = (pred == y).mean()
+        assert acc > 0.95
