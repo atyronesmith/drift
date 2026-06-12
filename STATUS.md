@@ -1,6 +1,6 @@
 # Drift — Project Status
 
-**Last updated:** 2026-06-11 12:11:08 EDT
+**Last updated:** 2026-06-12 17:30:58 EDT
 
 ## Current state
 
@@ -21,12 +21,25 @@ output distributions into (possibly probabilistic) generated code.
 
 - Analysis: `docs/design/REASONING_EXTRACTION_ANALYSIS.md`
 - Implementation plan (7 phases, decision-gated): `docs/design/HIDDEN_STATE_PROBES_PLAN.md`
-- Status: **plan drafted, implementation not started** (stopped at plan per direction,
-  2026-06-11).
-- Next action when resumed: Phase 0 — `src/drift/probing/mlx_hidden.py` + `/v1/hidden`
-  endpoint (prefill-only hidden-state capture), then Phase 1 Tier 4 `hidden_probe` rules
-  benchmarked against the Tier 3 coverage ceiling. Go/no-go answer expected in ~1 week of
-  work (Decision Gate 1).
+- Status as of 2026-06-12: **Phases 0–3 implemented and verified; Gate 1 in progress.**
+  - Phase 0 done: `mlx_hidden.py`, `/v1/hidden`, `probe-hidden` CLI. 32B all-layer
+    last-token capture works (64x5120, ~5s prefill server-resident).
+  - Phase 1 done (infra): `hidden_probe` rule type with class distributions and
+    confidence-gated escalation, shared single prefill in executor, compiler codegen,
+    probe trainer with in-fold standardization folded into exported weights.
+  - Phase 2/3 done (infra): layer-sweep script + L* selection; `max_layer` truncated
+    prefill verified equal to full-pass prefix.
+  - Phase 5/6 cores done offline: concept-bottleneck programs (`concepts.py`,
+    `concept_program` rule type), soft-label distillation (`distill.py`, ECE).
+  - **Gate 1 interim (n=100, helpdesk triage)**: at layer 48/64, `severity` probe
+    reaches **75.8% coverage @ 0.95 confidence, 93.3% acc-on-covered** vs BoW 7.1%
+    coverage — clean pass. 7–10-class fields (`root_cause_category`,
+    `assignment_group`) are data-starved at n=100 (~10/class vs 5120 dims); corpus
+    extension to 500 tickets capturing now (~3h). Final Gate 1 readout after that.
+  - Corpus: `results/hidden_probe_corpus/` (labels + all-layer hidden states,
+    Console-AI helpdesk dataset re-fetched to `datasets/helpdesk_tickets.jsonl`).
+  - Known issue: standardized probes are overconfident on multi-class fields
+    (acc-on-covered < threshold); temperature calibration lands in Phase 6.
 
 ## Housekeeping
 
