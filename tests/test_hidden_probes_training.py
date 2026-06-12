@@ -75,3 +75,27 @@ class TestCoverage:
         cov, acc = coverage_at_threshold(probs, y, ["a", "b"], threshold=0.95)
         assert cov == 0.0
         assert acc is None
+
+
+class TestLstarSelection:
+    def test_monotone_curve(self):
+        from drift.hybrid.probes import select_lstar
+        acc = {0: 0.5, 8: 0.7, 16: 0.9, 24: 0.95, 32: 0.96, 40: 0.96}
+        # best = 0.96, 95% of best = 0.912 -> earliest layer >= 0.912 is 24
+        assert select_lstar(acc) == 24
+
+    def test_plateau_picks_earliest(self):
+        from drift.hybrid.probes import select_lstar
+        acc = {0: 0.9, 8: 0.9, 16: 0.9}
+        assert select_lstar(acc) == 0
+
+    def test_noisy_curve(self):
+        from drift.hybrid.probes import select_lstar
+        acc = {0: 0.6, 8: 0.93, 16: 0.85, 24: 0.95}
+        # 95% of 0.95 = 0.9025 -> layer 8 qualifies despite later dip
+        assert select_lstar(acc) == 8
+
+    def test_custom_fraction(self):
+        from drift.hybrid.probes import select_lstar
+        acc = {0: 0.5, 8: 0.8, 16: 1.0}
+        assert select_lstar(acc, fraction=0.79) == 8

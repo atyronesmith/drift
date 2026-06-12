@@ -136,6 +136,20 @@ def coverage_at_threshold(
     return coverage, accuracy
 
 
+def select_lstar(accuracy_by_layer: dict[int, float], fraction: float = 0.95) -> int:
+    """Reasoning depth L*: earliest layer reaching `fraction` of best accuracy.
+
+    The accuracy-vs-layer curve tells you how much model a decision needs;
+    L* is where to truncate the forward pass for that field.
+    """
+    best = max(accuracy_by_layer.values())
+    cutoff = best * fraction
+    for layer in sorted(accuracy_by_layer):
+        if accuracy_by_layer[layer] >= cutoff:
+            return layer
+    return max(accuracy_by_layer)  # unreachable, best itself qualifies
+
+
 def export_probe_rule(probe: dict, path: str, weights_path: str | None = None,
                       confidence_threshold: float = 0.95) -> dict:
     """Convert a trained probe into a hybrid rule dict.
