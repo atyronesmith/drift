@@ -143,7 +143,13 @@ async def run_hybrid(
     # On failure, probes escalate to LLM — no new failure mode.
     hidden_states = None
     hidden_ms = 0.0
-    probe_layers = sorted({r["layer"] for r in rules if r.get("type") == "hidden_probe"})
+    probe_layers = set()
+    for r in rules:
+        if r.get("type") == "hidden_probe":
+            probe_layers.add(r["layer"])
+        elif r.get("type") == "concept_program":
+            probe_layers.update(c["layer"] for c in r.get("concepts", []))
+    probe_layers = sorted(probe_layers)
     if probe_layers:
         t0 = _time.perf_counter()
         try:
