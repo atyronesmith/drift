@@ -18,6 +18,17 @@ class HybridResult:
     rules_applied: int
     rules_matched: int
     response: object = None  # provider response for timing
+    hidden_ms: float = 0.0  # time spent fetching hidden states (0 if none)
+
+
+def _fetch_hidden_states_remote(system, prompt, base_url=None, layers=None,
+                                positions="last_input", prefill_only=True):
+    """Indirection over probe_hidden_remote so tests can monkeypatch it."""
+    from drift.probing.mlx_hidden import probe_hidden_remote
+    return probe_hidden_remote(
+        system=system, prompt=prompt, base_url=base_url,
+        layers=layers, positions=positions, prefill_only=prefill_only,
+    )
 
 
 def deep_merge(base, overlay):
@@ -108,6 +119,7 @@ async def run_hybrid(
     temperature: float = 0,
     merge_mode: str = "llm_over_rules",
     output_mode: str = "merge",
+    hidden_provider: dict | None = None,
 ) -> HybridResult:
     """Execute the hybrid pipeline: rules first, then focused LLM call.
 
@@ -121,9 +133,33 @@ async def run_hybrid(
         temperature: LLM temperature
         merge_mode: "llm_over_rules" (LLM wins conflicts) or "rules_over_llm"
         output_mode: "merge" (combine rules+LLM as JSON) or "llm_passthrough" (LLM output is final)
+        hidden_provider: Config for hidden_probe rules, e.g. {"base_url": ...}.
+            One prefill pass over (system_prompt, input_text) is shared by all
+            probe rules. Probe training must use the same prompt convention.
     """
+    import time as _time
+
+    # Phase 0: One shared hidden-state fetch if any hidden_probe rules exist.
+    # On failure, probes escalate to LLM — no new failure mode.
+    hidden_states = None
+    hidden_ms = 0.0
+    probe_layers = sorted({r["layer"] for r in rules if r.get("type") == "hidden_probe"})
+    if probe_layers:
+        t0 = _time.perf_counter()
+        try:
+            hs = _fetch_hidden_states_remote(
+                system=system_prompt, prompt=input_text,
+                base_url=(hidden_provider or {}).get("base_url"),
+                layers=probe_layers, positions="last_input",
+            )
+            pos = hs.positions[0]
+            hidden_states = {layer: hs.vector(layer, pos) for layer in probe_layers}
+        except Exception:
+            hidden_states = None
+        hidden_ms = (_time.perf_counter() - t0) * 1000
+
     # Phase 1: Execute rules
-    extracted, rule_results = execute_rules(rules, input_text)
+    extracted, rule_results = execute_rules(rules, input_text, hidden_states=hidden_states)
     rules_matched = sum(1 for r in rule_results if r.matched)
 
     # Collect escalation hints from classifier rules that were below threshold
@@ -158,6 +194,7 @@ async def run_hybrid(
             rules_applied=len(rules),
             rules_matched=rules_matched,
             response=response,
+            hidden_ms=hidden_ms,
         )
 
     # Default merge mode: parse and combine
@@ -176,6 +213,7 @@ async def run_hybrid(
         rules_applied=len(rules),
         rules_matched=rules_matched,
         response=response,
+        hidden_ms=hidden_ms,
     )
 
 

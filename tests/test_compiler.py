@@ -95,7 +95,8 @@ def test_compiled_engine_has_docstring():
     assert "Tier 1 (regex/literal): 3 fields" in code
     assert "Tier 2 (mapping/conditional): 2 fields" in code
     assert "Tier 3 (classifier): 0 fields" in code
-    assert "Tier 4 (LLM): 1 field groups" in code
+    assert "Tier 4 (hidden probe): 0 fields" in code
+    assert "LLM: 1 field groups" in code
 
 
 def test_compiled_engine_no_llm_fields():
