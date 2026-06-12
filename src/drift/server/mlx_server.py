@@ -275,6 +275,7 @@ class DriftMLXHandler(BaseHTTPRequestHandler):
             prefill_only=data.get("prefill_only", True),
             max_tokens=data.get("max_tokens", 0),
             temperature=data.get("temperature", 0),
+            max_layer=data.get("max_layer"),
         )
         elapsed_ms = (time.perf_counter() - t0) * 1000
 

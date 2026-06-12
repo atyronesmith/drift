@@ -103,17 +103,36 @@ def _resolve_layers(spec: str | list[int], n_layers: int) -> list[int]:
     return layers
 
 
+def _validate_max_layer(max_layer: int | None, target_layers: list[int]) -> None:
+    """A truncated forward pass must still reach every requested layer."""
+    if max_layer is not None and target_layers and max_layer < max(target_layers):
+        raise ValueError(
+            f"max_layer={max_layer} is below requested layer {max(target_layers)}"
+        )
+
+
+class _EarlyExit(Exception):
+    """Raised inside the patched block to stop the forward pass at max_layer."""
+
+
 def _capture_block_outputs(mlx_model, full_ids: list[int],
-                            target_layers: list[int], positions: list[int]) -> dict:
+                            target_layers: list[int], positions: list[int],
+                            max_layer: int | None = None) -> dict:
     """Run one forward pass, capturing block outputs at (layer, position) pairs.
 
     Patches the TransformerBlock class __call__ to record outputs. Only the
     requested positions are materialized — the full [layers x seq x d_model]
     tensor never exists on the Python side.
 
+    With max_layer set, the pass aborts right after that block — layers
+    above it (and the final norm / lm_head) are never computed. This is the
+    truncated-prefill runtime: pay for exactly the reasoning depth needed.
+
     Returns {layer: {position: list[float]}} in float32.
     """
     import mlx.core as mx
+
+    _validate_max_layer(max_layer, target_layers)
 
     layers = mlx_model.model.layers
     n_layers = len(layers)
@@ -136,11 +155,15 @@ def _capture_block_outputs(mlx_model, full_ids: list[int],
                 mx.eval(vec)
                 by_pos[pos] = vec.tolist()
             captured[layer_idx] = by_pos
+        if max_layer is not None and layer_idx >= max_layer:
+            raise _EarlyExit()
         return out
 
     block_cls.__call__ = _capturing_call
     try:
         mlx_model(mx.array([full_ids]))
+    except _EarlyExit:
+        pass
     finally:
         block_cls.__call__ = orig_call
 
@@ -158,6 +181,7 @@ def _probe_hidden_with_model(
     prefill_only: bool = True,
     max_tokens: int = 0,
     temperature: float = 0,
+    max_layer: int | None = None,
 ) -> HiddenStateResult:
     """Core hidden-state probing using a pre-loaded model.
 
@@ -198,7 +222,8 @@ def _probe_hidden_with_model(
         full_ids = tokenizer.encode(formatted + content)
 
     states = _capture_block_outputs(
-        mlx_model, full_ids, resolved_layers, resolved_positions
+        mlx_model, full_ids, resolved_layers, resolved_positions,
+        max_layer=max_layer,
     )
 
     return HiddenStateResult(
@@ -254,6 +279,7 @@ def probe_hidden_remote(
     prefill_only: bool = True,
     max_tokens: int = 0,
     timeout: int = 600,
+    max_layer: int | None = None,
 ) -> HiddenStateResult:
     """Probe hidden states via a running drift MLX server (/v1/hidden).
 
@@ -272,6 +298,7 @@ def probe_hidden_remote(
         "positions": positions,
         "prefill_only": prefill_only,
         "max_tokens": max_tokens,
+        "max_layer": max_layer,
     }
 
     result = subprocess.run(

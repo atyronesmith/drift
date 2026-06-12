@@ -98,6 +98,20 @@ class TestLayerResolution:
             _resolve_layers("final", n_layers=4)
 
 
+class TestMaxLayerValidation:
+    def test_max_layer_below_requested_layer_raises(self):
+        from drift.probing.mlx_hidden import _validate_max_layer
+
+        with pytest.raises(ValueError):
+            _validate_max_layer(max_layer=10, target_layers=[5, 20])
+
+    def test_max_layer_ok(self):
+        from drift.probing.mlx_hidden import _validate_max_layer
+
+        _validate_max_layer(max_layer=20, target_layers=[5, 20])
+        _validate_max_layer(max_layer=None, target_layers=[5, 20])
+
+
 @pytest.mark.skipif(not INTEGRATION, reason="set DRIFT_MLX_INTEGRATION=1 to run")
 class TestCaptureIntegration:
     @pytest.fixture(scope="class")
@@ -136,6 +150,29 @@ class TestCaptureIntegration:
             assert len(vec) == hidden_dim
         assert all(v == v for v in vec)  # no NaN
         assert any(v != 0.0 for v in vec)
+
+    def test_truncated_equals_full_prefix(self, loaded):
+        from drift.probing.mlx_hidden import _probe_hidden_with_model
+
+        mlx_model, tokenizer = loaded
+        kwargs = dict(
+            system="You are a helpful assistant.",
+            prompt="Say hello.",
+            model_name=SMALL_MODEL,
+            layers=[4, 8],
+            positions="last_input",
+            prefill_only=True,
+        )
+        full = _probe_hidden_with_model(mlx_model, tokenizer, **kwargs)
+        truncated = _probe_hidden_with_model(mlx_model, tokenizer, max_layer=8, **kwargs)
+
+        pos = full.positions[0]
+        for layer in (4, 8):
+            a = full.vector(layer, pos)
+            b = truncated.vector(layer, pos)
+            assert len(a) == len(b)
+            diff = max(abs(x - y) for x, y in zip(a, b))
+            assert diff < 1e-3, f"layer {layer} differs by {diff}"
 
     def test_generate_mode_returns_content(self, loaded):
         from drift.probing.mlx_hidden import _probe_hidden_with_model
