@@ -36,10 +36,12 @@ def compile_engine(
     mapping_rules = [r for r in rules if r["type"] == "mapping"]
     conditional_rules = [r for r in rules if r["type"] == "conditional"]
     classifier_rules = [r for r in rules if r["type"] == "classifier"]
+    hidden_probe_rules = [r for r in rules if r["type"] == "hidden_probe"]
 
     tier1_count = len(regex_rules) + len(regex_all_rules) + len(literal_rules)
     tier2_count = len(mapping_rules) + len(conditional_rules)
     tier3_count = len(classifier_rules)
+    tier4_count = len(hidden_probe_rules)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -53,12 +55,21 @@ def compile_engine(
     lines.append(f"Tier 1 (regex/literal): {tier1_count} fields")
     lines.append(f"Tier 2 (mapping/conditional): {tier2_count} fields")
     lines.append(f"Tier 3 (classifier): {tier3_count} fields")
-    lines.append(f"Tier 4 (LLM): {len(llm_fields)} field groups")
+    lines.append(f"Tier 4 (hidden probe): {tier4_count} fields")
+    lines.append(f"LLM: {len(llm_fields)} field groups")
+    if hidden_probe_rules:
+        lines.append(f"")
+        lines.append(f"Hidden-probe fields require a running drift MLX server")
+        lines.append(f"(drift serve <model>); set DRIFT_MLX_URL or default localhost:8080.")
+        lines.append(f"On server failure those fields escalate to the LLM call.")
     lines.append(f'"""')
     lines.append(f"")
     lines.append(f"import json")
-    if classifier_rules:
+    if classifier_rules or hidden_probe_rules:
         lines.append(f"import math")
+    if hidden_probe_rules:
+        lines.append(f"import os")
+        lines.append(f"import subprocess")
     lines.append(f"import re")
     lines.append(f"")
     lines.append(f"")
@@ -81,6 +92,24 @@ def compile_engine(
         lines.append(f"_CLF_{field_id}_THRESHOLD = {rule.get('confidence_threshold', 0.95)!r}")
         if rule.get("structured_features"):
             lines.append(f"_CLF_{field_id}_STRUCTURED = {rule['structured_features']!r}")
+        lines.append(f"")
+
+    # Hidden-probe constants
+    for rule in hidden_probe_rules:
+        field_id = _field_id(rule["path"])
+        lines.append(f"")
+        lines.append(f"# Hidden-state probe: {rule['path']} (layer {rule['layer']}, "
+                     f"model {rule.get('probe_model', '?')})")
+        lines.append(f"_HP_{field_id}_LAYER = {rule['layer']!r}")
+        lines.append(f"_HP_{field_id}_CLASSES = {rule['classes']!r}")
+        lines.append(f"_HP_{field_id}_THRESHOLD = {rule.get('confidence_threshold', 0.95)!r}")
+        if rule.get("weights") is not None:
+            lines.append(f"_HP_{field_id}_WEIGHTS = {rule['weights']!r}")
+            lines.append(f"_HP_{field_id}_BIAS = {rule['bias']!r}")
+        else:
+            lines.append(f"_HP_{field_id}_WEIGHTS_REF = {rule['weights_ref']!r}")
+            lines.append(f"_HP_{field_id}_WEIGHTS = None  # lazy-loaded from npz")
+            lines.append(f"_HP_{field_id}_BIAS = None")
         lines.append(f"")
 
     lines.append(f"")
@@ -156,9 +185,10 @@ def compile_engine(
         lines.append(f"")
 
     # Tier 3: Classifier rules
+    if classifier_rules or hidden_probe_rules:
+        lines.append(f"    _escalated = []")
     if classifier_rules:
         lines.append(f"    # --- Tier 3: Classifier (< 1ms, confidence-gated) ---")
-        lines.append(f"    _escalated = []")
         for rule in classifier_rules:
             field_id = _field_id(rule["path"])
             path = rule["path"]
@@ -170,9 +200,30 @@ def compile_engine(
             lines.append(f"        _escalated.append(({path!r}, _clf_val, _clf_conf))")
         lines.append(f"")
 
+    # Tier 4: Hidden-state probe rules (one shared prefill)
+    if hidden_probe_rules:
+        hp_layers = sorted({r["layer"] for r in hidden_probe_rules})
+        lines.append(f"    # --- Tier 4: Hidden-state probes (one prefill, confidence-gated) ---")
+        lines.append(f"    try:")
+        lines.append(f"        _hidden = _fetch_hidden({hp_layers!r}, input_text)")
+        lines.append(f"    except Exception:")
+        lines.append(f"        _hidden = None")
+        for rule in hidden_probe_rules:
+            field_id = _field_id(rule["path"])
+            path = rule["path"]
+            lines.append(f"    if _hidden is not None and _HP_{field_id}_LAYER in _hidden:")
+            lines.append(f"        _hp_val, _hp_conf, _hp_ok = _probe_{field_id}(_hidden[_HP_{field_id}_LAYER])")
+            lines.append(f"        if _hp_ok:")
+            lines.append(f"            _set(result, {path!r}, _hp_val)")
+            lines.append(f"        else:")
+            lines.append(f"            _escalated.append(({path!r}, _hp_val, _hp_conf))")
+            lines.append(f"    else:")
+            lines.append(f"        _escalated.append(({path!r}, None, 0.0))")
+        lines.append(f"")
+
     # Tier 4: LLM call
     if llm_fields:
-        if classifier_rules:
+        if classifier_rules or hidden_probe_rules:
             lines.append(f"    # --- Tier 4: LLM for reasoning fields + escalations ---")
             lines.append(f"    _llm_fields = LLM_FIELDS + [e[0] for e in _escalated]")
             lines.append(f"    if llm and _llm_fields:")
@@ -231,6 +282,63 @@ def compile_engine(
         lines.append(f"")
         lines.append(f"")
 
+    # Hidden-probe helpers
+    if hidden_probe_rules:
+        for rule in hidden_probe_rules:
+            field_id = _field_id(rule["path"])
+            uses_ref = rule.get("weights") is None
+            lines.append(f"def _probe_{field_id}(h: list) -> tuple[str, float, bool]:")
+            lines.append(f'    """Logistic probe on hidden state for {rule["path"]}."""')
+            if uses_ref:
+                lines.append(f"    global _HP_{field_id}_WEIGHTS, _HP_{field_id}_BIAS")
+                lines.append(f"    if _HP_{field_id}_WEIGHTS is None:")
+                lines.append(f"        import numpy as _np")
+                lines.append(f"        _data = _np.load(_HP_{field_id}_WEIGHTS_REF)")
+                lines.append(f"        _HP_{field_id}_WEIGHTS = _data['weights'].tolist()")
+                lines.append(f"        _HP_{field_id}_BIAS = _data['bias'].tolist()")
+            lines.append(f"    n_classes = len(_HP_{field_id}_CLASSES)")
+            lines.append(f"    logits = [_HP_{field_id}_BIAS[c] + sum(")
+            lines.append(f"        _HP_{field_id}_WEIGHTS[c][j] * hv for j, hv in enumerate(h)")
+            lines.append(f"    ) for c in range(n_classes)]")
+            lines.append(f"    mx = max(logits)")
+            lines.append(f"    exps = [math.exp(l - mx) for l in logits]")
+            lines.append(f"    total = sum(exps)")
+            lines.append(f"    probs = [e / total for e in exps]")
+            lines.append(f"    best = max(range(n_classes), key=lambda i: probs[i])")
+            lines.append(f"    ok = probs[best] >= _HP_{field_id}_THRESHOLD")
+            lines.append(f"    return _HP_{field_id}_CLASSES[best], probs[best], ok")
+            lines.append(f"")
+            lines.append(f"")
+
+        lines.append(f"def _fetch_hidden(layers: list, input_text: str) -> dict:")
+        lines.append(f'    """One prefill pass via the drift MLX server (/v1/hidden).')
+        lines.append(f"")
+        lines.append(f"    Returns {{layer: hidden_vector}} at the last input token. Uses curl")
+        lines.append(f"    subprocess (endpoint security blocks direct Python TCP sockets).")
+        lines.append(f'    """')
+        lines.append(f"    base = os.environ.get('DRIFT_MLX_URL', 'http://localhost:8080').rstrip('/')")
+        lines.append(f"    payload = json.dumps({{")
+        lines.append(f"        'messages': [")
+        lines.append(f"            {{'role': 'system', 'content': SYSTEM_PROMPT}},")
+        lines.append(f"            {{'role': 'user', 'content': input_text}},")
+        lines.append(f"        ],")
+        lines.append(f"        'layers': layers, 'positions': 'last_input', 'prefill_only': True,")
+        lines.append(f"    }})")
+        lines.append(f"    proc = subprocess.run(")
+        lines.append(f"        ['curl', '-s', '-X', 'POST', base + '/v1/hidden',")
+        lines.append(f"         '-H', 'Content-Type: application/json', '-d', payload],")
+        lines.append(f"        capture_output=True, text=True, timeout=600,")
+        lines.append(f"    )")
+        lines.append(f"    if proc.returncode != 0:")
+        lines.append(f"        raise RuntimeError(f'curl exit {{proc.returncode}}: {{proc.stderr}}')")
+        lines.append(f"    data = json.loads(proc.stdout)")
+        lines.append(f"    if 'error' in data:")
+        lines.append(f"        raise RuntimeError(data['error'])")
+        lines.append(f"    pos = str(data['positions'][0])")
+        lines.append(f"    return {{int(layer): by_pos[pos] for layer, by_pos in data['states'].items()}}")
+        lines.append(f"")
+        lines.append(f"")
+
     # _extract
     lines.append(f"def _extract(pattern: str, text: str) -> str | None:")
     lines.append(f'    """Extract first regex capture group."""')
@@ -285,27 +393,29 @@ def compile_engine(
         lines.append(f"")
 
         # _call_llm
-        if classifier_rules:
+        has_escalation = bool(classifier_rules or hidden_probe_rules)
+        if has_escalation:
             lines.append(f"def _call_llm(llm, input_text: str, extracted: dict, fields: list[str] | None = None, escalated: list | None = None) -> dict:")
-            lines.append(f'    """Call LLM for reasoning fields + escalated classifier fields."""')
+            lines.append(f'    """Call LLM for reasoning fields + escalated classifier/probe fields."""')
             lines.append(f"    fields_str = ', '.join(fields or LLM_FIELDS)")
         else:
             lines.append(f"def _call_llm(llm, input_text: str, extracted: dict) -> dict:")
             lines.append(f'    """Call LLM for reasoning fields only."""')
             lines.append(f"    fields_str = ', '.join(LLM_FIELDS)")
         lines.append(f"    extracted_json = json.dumps(extracted, indent=2)")
-        if classifier_rules:
+        if has_escalation:
             lines.append(f"    hint_block = ''")
-            lines.append(f"    if escalated:")
+            lines.append(f"    _hinted = [e for e in (escalated or []) if e[1] is not None]")
+            lines.append(f"    if _hinted:")
             lines.append(f"        hint_lines = ['A classifier made tentative predictions for the following fields '")
             lines.append(f"                      'but was not confident enough. Verify or correct these:']")
-            lines.append(f"        for path, hint, conf in escalated:")
+            lines.append(f"        for path, hint, conf in _hinted:")
             lines.append(f"            hint_lines.append(f'  - {{path}}: tentatively \"{{hint}}\" ({{round(conf * 100, 1)}}% confidence)')")
             lines.append(f"        hint_block = '\\n'.join(hint_lines) + '\\n\\n'")
         lines.append(f"    prompt = (")
         lines.append(f'        "The following fields have already been extracted:\\n"')
         lines.append(f'        f"```json\\n{{extracted_json}}\\n```\\n\\n"')
-        if classifier_rules:
+        if has_escalation:
             lines.append(f"        f\"{{hint_block}}\"")
         lines.append(f'        "Based on the input below, provide ONLY these fields as valid JSON:\\n"')
         lines.append(f'        f"{{fields_str}}\\n\\n"')

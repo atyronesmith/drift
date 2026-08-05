@@ -74,7 +74,9 @@ Each task lives in `tasks/<name>/` with `input.md`, prompt files, and `functiona
 - `docs/GUARD.md` — Guard module: tiered classification, FPR findings
 - `docs/CONTINUOUS_CALIBRATION.md` — Runtime JSD monitoring, auto-retrain workflow
 - `docs/LLAMA_GUARD_SE.md` — Standalone finding: Llama Guard 3-1B 47.8% FPR on SE content
-- `docs/CONDITIONAL_CLASSIFIERS.md` — Conditional classifiers + continuous calibration plan
+- `docs/design/CONDITIONAL_CLASSIFIERS.md` — Conditional classifiers + continuous calibration plan
+- `docs/design/REASONING_EXTRACTION_ANALYSIS.md` — Findings: extracting reasoning logic via hidden-state probes
+- `docs/design/HIDDEN_STATE_PROBES_PLAN.md` — Implementation plan for Tier 4 hidden-state probe rules
 
 ## Providers
 
