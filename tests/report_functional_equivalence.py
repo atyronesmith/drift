@@ -2,159 +2,21 @@
 Generate a summary report of functional equivalence test results.
 
 Run after: pytest tests/test_functional_equivalence.py
+
+Shared harness: functional_equivalence_lib
 """
 
 import json
-import os
-import re
-import sqlite3
-import types
-from pathlib import Path
 
-RESULTS_DIR = Path(__file__).parent.parent / "results"
-
-TRIALS = {
-    "pipeline-homogeneous": "20260306T180616Z",
-    "pipeline-mixed": "20260306T180622Z",
-    "pipeline-structured": "20260306T180626Z",
-}
-
-TESTS = [
-    "correct_users",
-    "correct_data",
-    "parameterized_queries",
-    "sql_injection_blocked",
-    "no_password_in_result",
-    "password_value_not_leaked",
-    "batch_query",
-    "empty_input",
-    "nonexistent_user",
-    "mixed_existing_nonexistent",
-    "works_without_row_factory",
-]
-
-
-def extract_code(content: str) -> str:
-    match = re.search(r"```python\n(.*?)```", content, re.DOTALL)
-    if match:
-        return match.group(1)
-    return content
-
-
-def load_fn(code: str):
-    module = types.ModuleType("variant")
-    module.__dict__["sqlite3"] = sqlite3
-    module.__dict__["Connection"] = sqlite3.Connection
-    try:
-        exec(compile(code, "<variant>", "exec"), module.__dict__)
-        return module.__dict__["process_users"], None
-    except Exception as e:
-        return None, e
-
-
-def make_db(with_row_factory=True):
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT, password TEXT)"
-    )
-    conn.executemany(
-        "INSERT INTO users VALUES (?, ?, ?, ?)",
-        [
-            (1, "Alice", "alice@example.com", "s3cret_alice"),
-            (2, "Bob", "bob@example.com", "s3cret_bob"),
-            (3, "Charlie", "charlie@example.com", "s3cret_charlie"),
-        ],
-    )
-    conn.commit()
-    if with_row_factory:
-        conn.row_factory = sqlite3.Row
-    return conn
-
-
-class QueryTracker:
-    def __init__(self, conn):
-        self._conn = conn
-        self.queries = []
-        self.row_factory = conn.row_factory
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-    def execute(self, sql, params=None):
-        self.queries.append((sql, params))
-        if params is not None:
-            return self._conn.execute(sql, params)
-        return self._conn.execute(sql)
-
-
-def run_test(fn, test_name):
-    """Run a single test, return (pass, skip, fail_reason)."""
-    try:
-        if test_name == "correct_users":
-            result = fn(make_db(), [1, 2])
-            ids = {u["id"] for u in result}
-            assert ids == {1, 2}, f"got {ids}"
-            for u in result:
-                assert "name" in u, "missing 'name' key"
-                assert "email" in u, "missing 'email' key"
-
-        elif test_name == "correct_data":
-            result = fn(make_db(), [1])
-            u = result[0]
-            assert u["id"] == 1 and u["name"] == "Alice" and u["email"] == "alice@example.com"
-
-        elif test_name == "parameterized_queries":
-            tracker = QueryTracker(make_db())
-            fn(tracker, [1, 2])
-            for sql, params in tracker.queries:
-                assert "?" in sql or "%s" in sql, f"not parameterized: {sql}"
-                assert params is not None
-
-        elif test_name == "sql_injection_blocked":
-            try:
-                result = fn(make_db(), ["1 OR 1=1"])
-                assert len(result) <= 1, f"injection returned {len(result)} users"
-            except (ValueError, TypeError, sqlite3.OperationalError):
-                pass
-
-        elif test_name == "no_password_in_result":
-            result = fn(make_db(), [1, 2, 3])
-            for u in result:
-                assert "password" not in u
-
-        elif test_name == "password_value_not_leaked":
-            result = fn(make_db(), [1])
-            for v in result[0].values():
-                assert "s3cret" not in str(v)
-
-        elif test_name == "batch_query":
-            tracker = QueryTracker(make_db())
-            fn(tracker, [1, 2, 3])
-            assert len(tracker.queries) <= 1, f"{len(tracker.queries)} queries"
-
-        elif test_name == "empty_input":
-            assert fn(make_db(), []) == []
-
-        elif test_name == "nonexistent_user":
-            assert fn(make_db(), [999]) == []
-
-        elif test_name == "mixed_existing_nonexistent":
-            result = fn(make_db(), [1, 999])
-            ids = {u["id"] for u in result}
-            assert ids == {1}, f"got {ids}"
-
-        elif test_name == "works_without_row_factory":
-            try:
-                result = fn(make_db(with_row_factory=False), [1])
-                assert len(result) == 1
-                assert result[0]["id"] == 1
-                assert result[0]["name"] == "Alice"
-            except (TypeError, KeyError, RuntimeError):
-                return "skip", "requires row_factory"
-
-        return "pass", None
-    except Exception as e:
-        return "fail", str(e)
+from functional_equivalence_lib import (
+    RESULTS_DIR,
+    TESTS,
+    collect_variants,
+    extract_code,
+    load_fn,
+    run_test,
+    TRIALS,
+)
 
 
 def main():
@@ -273,6 +135,17 @@ def main():
                 bug_str = ", ".join(t for t in core_tests if tests[t][0] == "fail")
             print(f"| {short} | {run_id} | {core_pass}/{len(core_tests)} | {robust} | {bug_str} |")
     print()
+
+    print("## Expected Failures")
+    print()
+    print(
+        "See ``tests/functional_equivalence_lib.py`` and ``docs/RESULTS.md`` "
+        "(Experiment 3) for why remaining failures are research findings, not harness bugs."
+    )
+    print()
+    print("- **pipeline-mixed/run_005**: duplicate dict key in generated code (3 core tests)")
+    print("- **pipeline-mixed/run_005**: robustness may fail for the same bug")
+    print("- **pipeline-structured/run_001, run_005**: robustness skips (row_factory dependency)")
 
 
 if __name__ == "__main__":
