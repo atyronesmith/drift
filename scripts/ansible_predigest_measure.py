@@ -6,7 +6,7 @@ pre-digested versions of N logs, measuring latency and comparing outputs.
 
 Usage:
     uv run python scripts/ansible_predigest_measure.py \
-        --log-dir /path/to/logs/failed/ \
+        --log-dir datasets/ansible_triage/inputs/ \
         --n 20 \
         --ollama-host http://localhost:11434
 """

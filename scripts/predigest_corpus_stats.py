@@ -6,7 +6,7 @@ Fast: processes 500 logs in seconds.
 
 Usage:
     uv run python scripts/predigest_corpus_stats.py \
-        --log-dir /path/to/logs/failed/ \
+        --log-dir datasets/ansible_triage/inputs/ \
         -o results/predigest_corpus_stats.json
 """
 

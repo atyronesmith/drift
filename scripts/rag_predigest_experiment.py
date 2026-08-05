@@ -7,7 +7,7 @@ chunk → embed → retrieve.
 
 Usage:
     uv run python scripts/rag_predigest_experiment.py \
-        --log-dir /path/to/logs/failed/ \
+        --log-dir datasets/ansible_triage/inputs/ \
         --summary-dir datasets/ansible_summaries/ \
         -o results/rag_predigest_experiment.json
 """

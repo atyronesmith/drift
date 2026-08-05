@@ -5,8 +5,8 @@ Phase 1: Analyze 500 failed Ansible job logs to understand structure,
 identify noise patterns, and quantify compression potential.
 
 Usage:
-    uv run python scripts/ansible_log_predigest.py --log-dir /path/to/logs/failed/
-    uv run python scripts/ansible_log_predigest.py --log-dir /path/to/logs/failed/ --predigest job_1460374.txt
+    uv run python scripts/ansible_log_predigest.py --log-dir datasets/ansible_triage/inputs/
+    uv run python scripts/ansible_log_predigest.py --log-dir datasets/ansible_triage/inputs/ --predigest job_1460374.txt
 """
 
 import argparse

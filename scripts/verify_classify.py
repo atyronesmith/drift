@@ -15,6 +15,8 @@ from pathlib import Path
 
 OLLAMA_MODEL = "qwen2.5:32b"
 OLLAMA_HOST = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ENGINE_SCRIPT = REPO_ROOT / "engines" / "ansible_classify.py"
 
 SYSTEM_PROMPT = Path("tasks/ansible_classify/system.md").read_text()
 USER_TEMPLATE = Path("tasks/ansible_classify/user.md").read_text()
@@ -56,9 +58,12 @@ def call_ollama(system: str, user: str) -> str:
 
 def run_engine(filepath: str) -> dict:
     result = subprocess.run(
-        [sys.executable, "results/ansible_classify_engine.py", filepath],
+        [sys.executable, str(ENGINE_SCRIPT), filepath],
         capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        print(result.stderr, file=sys.stderr)
+        return {}
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError:

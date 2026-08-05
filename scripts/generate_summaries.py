@@ -5,7 +5,7 @@ Produces individual summary .txt files for use as drift inputs.
 
 Usage:
     uv run python scripts/generate_summaries.py \
-        --log-dir /path/to/logs/failed/ \
+        --log-dir datasets/ansible_triage/inputs/ \
         --n 50 \
         -o datasets/ansible_summaries/
 """
