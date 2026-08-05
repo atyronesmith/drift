@@ -46,6 +46,6 @@ When a classifier escalates to LLM (confidence below threshold), pass the partia
 
 ## Implementation Order
 
-1. ~~Conditional classifiers~~ — **Done** (FIELDCTO-1018). `autogen.py` accepts resolved_paths (Tier 1+2) for classifier features.
-2. ~~Escalation enrichment~~ — **Done** (FIELDCTO-1019). `rules.py` preserves tentative predictions on escalation. `executor.py` and `compiler.py` include hints in LLM prompt.
-3. ~~Drift detection~~ — **Done** (FIELDCTO-1020). `calibration.py` computes baseline distributions during training. `denoise/monitor.py` provides `ClassifierMonitor` with JSD drift detection.
+1. ~~Conditional classifiers~~ — **Done**. `autogen.py` accepts resolved_paths (Tier 1+2) for classifier features.
+2. ~~Escalation enrichment~~ — **Done**. `rules.py` preserves tentative predictions on escalation. `executor.py` and `compiler.py` include hints in LLM prompt.
+3. ~~Drift detection~~ — **Done**. `calibration.py` computes baseline distributions during training. `denoise/monitor.py` provides `ClassifierMonitor` with JSD drift detection.

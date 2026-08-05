@@ -78,12 +78,12 @@ Each task lives in `tasks/<name>/` with `input.md`, prompt files, and `functiona
 
 ## Providers
 
-- **Ollama** — self-hosted at 192.168.15.10:11434 (not localhost). Uses curl subprocess.
+- **Ollama** — self-hosted on the local network (not localhost). Uses curl subprocess.
 - **DeepInfra** — OpenAI-compatible API, key in .env.
 - **Vertex AI** — Claude Sonnet via Google Cloud, uses anthropic SDK directly.
 - Ollama/DeepInfra use `subprocess` + `curl` — endpoint security blocks Python's direct TCP sockets.
 
-## Relationship to Denoise
+## Relationship to logdigest
 
 logdigest (sibling repo at `../denoise`) is the runtime pre-digestion library. Drift trains, experiments, and validates.
 
