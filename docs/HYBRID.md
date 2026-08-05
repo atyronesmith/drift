@@ -596,7 +596,7 @@ Adding `(one of: Access Management, Account Management, ...)` to the assignment_
 
 ## Runtime Library
 
-The [denoise](https://github.com/atyronesmith/drift) sibling repo provides the production runtime for pre-digestion and tiered classification. Drift trains and validates; denoise runs in production. See denoise's `docs/GUARD.md` for the guard module and `docs/PREDIGESTION.md` for pre-digestion theory and results.
+The [logdigest](https://github.com/atyronesmith/logdigest) sibling repo provides the production runtime for pre-digestion. Tiered classification (guard, drift monitoring) lives here in drift's `src/drift/safety/` and is trained, validated, and run from this repo — see [docs/GUARD.md](GUARD.md) for the guard module. See logdigest's `docs/PREDIGESTION.md` for pre-digestion theory and results.
 
 ## Source Code
 

@@ -25,7 +25,7 @@ Strips structural noise from text before feeding to a safety guard, reducing inp
 - Limits repetitive import statements (keeps first 3)
 
 ```python
-from denoise.guard import predigest
+from drift.safety.classifier import predigest
 
 cleaned = predigest(llm_output)
 # Feed cleaned text to your guard model instead of raw output
@@ -42,7 +42,7 @@ Three-tier safe/unsafe classification that eliminates most LLM guard calls:
 **Tier 3 (escalate to LLM guard):** When Tier 2 confidence is too low, returns `("escalate", confidence)` to trigger full LLM guard.
 
 ```python
-from denoise.guard import classify, load_weights
+from drift.safety.classifier import classify, load_weights
 
 load_weights("weights/guard_classifier_weights.json",
              "weights/guard_tier1_keywords.json")
@@ -87,7 +87,7 @@ python scripts/train_guard_classifier.py
 #          results/guard_classifier/guard_tier1_keywords.json
 ```
 
-The classifier is exported as weight matrices — denoise needs only stdlib Python at runtime (no sklearn, no numpy). The compiled code does sparse dot product + softmax with numerical stability.
+The classifier is exported as weight matrices — inference needs only stdlib Python at runtime (no sklearn, no numpy). The compiled code does sparse dot product + softmax with numerical stability.
 
 ## What's Next
 

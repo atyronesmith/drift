@@ -9,8 +9,10 @@
   Tier 3 (bag-of-words logistic regression, confidence-gated, JSD drift monitoring).
 - MLX server (`drift serve`) exposes `/v1/chat/completions`, `/v1/logprobs` (full-vocab
   entropy), `/v1/attention` (input attribution).
-- Known ceiling: Tier 3 classifiers cover ~25% of cases at 0.95 confidence; remaining
-  fields fall through to full LLM decode (see docs/THEORY.md "Beyond the Entropy Floor").
+- Tier 3 classifiers: coverage scales with labeled data (80.6% on `severity` at n=500,
+  τ=0.95); the earlier ~25% figure at n≈400 was sample starvation, not a hard limit
+  (see docs/THEORY.md "Beyond the Entropy Floor" and Gate 1 results below). Vocabulary-poor
+  fields (`root_cause`) still need hidden-state probes or LLM fallback.
 - Safety track: tiered guard (keyword → logistic regression → LLM guard), Llama Guard
   3-1B FPR finding documented in docs/LLAMA_GUARD_SE.md.
 

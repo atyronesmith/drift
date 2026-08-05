@@ -1,5 +1,9 @@
 # Theoretical Notes
 
+## Empirical Basis
+
+These notes connect external multi-agent literature to findings measured in this repo. Quantitative claims about drift, functional equivalence, pre-digestion, and classifier distillation are grounded in [RESULTS.md](RESULTS.md): pipeline functional equivalence ([Experiments 3–4](RESULTS.md)), temperature and model-version effects ([Experiments 5–6](RESULTS.md)), infrastructure comparison ([Experiment 7](RESULTS.md)), classifier POC ([Experiment 12](RESULTS.md)), and Ansible pre-digestion plus RAG ingestion ([Experiments 13–16](RESULTS.md)). Infrastructure variance framing aligns with [BASIS.md](BASIS.md).
+
 ## Voting vs. Deliberation: Is Simple Good Enough?
 
 The Council of AIs study (Shaikh et al., 2025) achieved 94.7% accuracy through multi-round deliberation among five GPT-4 instances. Simple majority voting hit 91.7% — only 3 percentage points lower.
@@ -26,9 +30,11 @@ This maps directly to our pipeline experiments:
 
 2. **Infrastructure variance is stochastic diversity**: Our temperature=0 experiments on Vertex produce 10/10 unique outputs from infrastructure noise alone. The Council deliberately sets temperature=1 to maximize diversity. Cloud infrastructure gives you diversity for free — the question is whether your architecture exploits or suffers from it.
 
-3. **Fan-out voting as a cheap defense**: Instead of a linear pipeline (our current approach, the least resilient topology), a fan-out step that runs N instances and takes the majority vote could absorb variance at a fraction of the cost of full deliberation. The 91.7% vs 94.7% result suggests this is usually sufficient.
+3. **Fan-out voting as a cheap defense, with a caveat**: Instead of a linear pipeline (our current approach, the least resilient topology), a fan-out step that runs N instances and takes the majority vote could absorb variance at a fraction of the cost of full deliberation. But voting and deliberation aren't solving the same problem: voting is cheap (~92% on USMLE) and provides no correction when the majority is wrong; deliberation is expensive (5-10x the token cost for +3pp overall) but recovers 53% of wrong-majority cases. Voting is usually sufficient — but only because wrong-majority cases are rare (~7% of questions here), not because it matches deliberation's correction power.
 
-4. **Heterogeneous models for real diversity**: Using different model families at different pipeline steps (our mixed pipeline: Claude -> Ollama) introduces genuinely different reasoning, not just stochastic sampling. This could break through the error floor that homogeneous councils can't penetrate — but our experiments show it also introduces different variance characteristics (length CV of 0.334 vs 0.158).
+4. **Heterogeneous models for real diversity — aspirational, not yet demonstrated**: Using different model families at different pipeline steps (our mixed pipeline: Claude Sonnet/Vertex -> Qwen2.5/Ollama) may introduce genuinely different reasoning, not just stochastic sampling — at the cost of different variance characteristics (length CV of 0.334 vs 0.158), including the one functional bug we observed (`pipeline-mixed/run_005`, see [Experiment 3](RESULTS.md)). We have not observed heterogeneity actually breaking through a shared error floor; so far it has produced more variance and the only defect found across 30 variants.
+
+5. **Structured output as a variance absorber**: JSON schema constraints at step 3 reduced edit distance from 0.73 (homogeneous free-form, Trial A) to 0.34 (structured JSON sandwich, Trial C) — a cross-trial comparison, and the only case where downstream variance decreased rather than compounded ([Experiment 2](RESULTS.md)). Constraining output space is cheaper than fan-out deliberation and directly reduces degrees of freedom for infrastructure noise.
 
 ## Distillation Viability: When Can You Eliminate the LLM?
 
@@ -44,10 +50,12 @@ Our functional equivalence data across three tasks validates this signal:
 
 | Task | Textual Exact Match | Functional Equivalence | Drift Source |
 |------|-------------------|----------------------|--------------|
-| code_review (30 runs, DeepInfra) | 33% | 96.7% | 1 variant with duplicate dict key bug |
+| code_review (30 runs: Vertex×3 / Vertex→Ollama / structured-JSON, [Experiments 3–4](RESULTS.md)) | 33%[^exact] | 96.7% | 1 variant with duplicate dict key bug |
 | data_extraction (30 runs, DeepInfra) | 83.3% | 100% | Description formatting, not values |
 | iterative_refactor (5 runs, DeepInfra) | 60% | 100% | Exception handler style, not security fixes |
 | iterative_refactor (3 runs, Ollama) | 100% | 100% | No drift (single GPU, deterministic) |
+
+[^exact]: *Textual exact match* is the fraction of outputs byte-identical to the first run in the set (`exact_match_rate` in `drift measure`). For code_review, 30 implementer outputs are pooled across three pipeline configurations; 10/30 (33%) match the reference output textually despite 29/30 passing all functional tests.
 
 The pattern is consistent: **textual drift wildly overstates functional drift.** Models vary in surface expression while applying the same underlying rules. The one genuine failure (code_review variant 5, duplicate dictionary key) produced a real bug — a 3.3% defect rate from drift alone.
 
@@ -61,6 +69,15 @@ This suggests a measurable threshold:
 | <80% | Decisions are inconsistent | LLM is unreliable for this task. Improve the prompt, model, or task decomposition before deploying. |
 
 The pattern: **use the LLM to discover the rules, codify them as deterministic code, use the LLM only for cases that fall outside the rules.** This gives you reproducibility and cost savings on the common path with the model as a fallback for genuinely ambiguous cases.
+
+### Caveats
+
+The threshold table assumes extraction- or transformation-heavy tasks with a meaningful functional test suite. Several factors shift the bands without changing the underlying pattern:
+
+- **Temperature**: On `data_extraction`, functional equivalence holds at 100% through temp=0.1, then degrades linearly to 40% at temp=1.0 ([Experiment 6](RESULTS.md)). Thresholds here assume temp≈0.
+- **Model version**: Upgrading Qwen2.5→Qwen3 dropped functional equivalence from 100% to 0% on `iterative_refactor` — a capability regression, not drift ([Experiment 5](RESULTS.md)). Re-measure after any model change.
+- **Test-suite design**: Functional equivalence is only as good as the tests. Claude Sonnet scored 0% on `iterative_refactor` because it chose bcrypt over plaintext — incompatible with the test DB, not necessarily incorrect ([Experiment 7](RESULTS.md)).
+- **Task type**: The gap between textual and functional metrics is largest where outputs have verifiable structure. Open-ended generation (the output *is* the deliverable) will show a smaller gap; distillation viability must be measured per task.
 
 ### A Concrete Example: Infrastructure Automation
 
@@ -79,7 +96,7 @@ This gives `drift measure` a prescriptive output beyond "here's how much your ou
 
 ## Drift as Task-Aware Compression
 
-> **Note:** The practical application of this theory is implemented in the [denoise](https://github.com/atyronesmith/drift) sibling repo — see denoise's `docs/PREDIGESTION.md` for results and usage.
+> **Note:** The practical application of this theory is implemented in the [logdigest](https://github.com/atyronesmith/logdigest) sibling repo — see logdigest's `docs/PREDIGESTION.md` for results and usage.
 
 Drift follows the same fundamental rules as lossless text compression. Both identify and eliminate redundancy — the difference is that drift is *lossy* and *task-aware*: the discarded bits are guaranteed to be noise for the downstream task, so reconstruction isn't needed.
 
@@ -151,7 +168,7 @@ This is not a limitation to work around — it's a fundamental information-theor
 
 ## Beyond the Entropy Floor: Intelligence as Compression
 
-Drift's classifier distillation proved something specific: logistic regression captures the first level of prediction (keyword → category) with high accuracy at high confidence, but the coverage ceiling (~25%) is exactly where single-level models run out of explanatory power. The remaining 75% requires deeper levels — contextual interactions, pragmatic inference, domain reasoning — encoded in the attention layers of the full model.
+Drift's classifier distillation proved something specific: logistic regression captures the first level of prediction (keyword → category) with high accuracy at high confidence, but at n≈400 the coverage ceiling (~25%, root_cause_category at threshold 0.90) looked like exactly where single-level models run out of explanatory power. **Revised by later data**: `STATUS.md`'s Gate 1 results (n=500, threshold 0.95) show the ~25% figure was sample starvation, not a hard limit — plain bag-of-words logistic regression reaches 80.6% coverage on `severity` with more labeled data. At that scale BoW also beats hidden-state probes on hold-out accuracy for all three fields (CV 0.97/0.74/0.82 vs 0.93/0.65/0.70); probes win on coverage where vocabulary fails (`root_cause`: 1.4% BoW vs 34.1% hidden, 24×) and on latency (~80ms vs 21.5s full decode). The hard ceiling holds only where surface features genuinely don't carry the signal — deeper representations help there, not everywhere.
 
 Drift's confidence-gated approach (classifier handles easy cases, LLM handles the rest) is a degenerate two-level hierarchy: one trivial model and one full-scale model with nothing in between. The most promising research direction is filling that middle — decomposing a large model into a hierarchy of smaller models, each capturing some of the deeper prediction levels without needing the full parameter count. MoE architectures do this implicitly (different experts for different inputs), speculative decoding does it explicitly (small model drafts, large model verifies), but neither truly decomposes the prediction hierarchy.
 
@@ -168,3 +185,9 @@ The emergence debate maps to phase transitions in compression. You add more data
 The uncomfortable version: maybe understanding is *always* just very obfuscated, highly accurate guessing — in humans too. We have the luxury of introspection that makes us feel like something deeper is happening. The LLM doesn't have that narrative layer, so we call it "just prediction."
 
 This is why "emergent features" is the right framing. Nobody designed reasoning into the training objective. The model was trained to predict tokens. But a predictor's internal model can become complex enough that it captures structure the designers didn't explicitly encode — and at that point, the outputs start looking like intelligence regardless of whether anything resembling understanding is happening underneath.
+
+## References
+
+- Shaikh, Y. et al. "Collaborative Intelligence in AI: Evaluating the Performance of a Council of AIs on the USMLE." *PLOS Digital Health* 4(10): e0000787 (2025). https://doi.org/10.1371/journal.pdig.0000787 — see also [knowledge base note](knowledge/collaborative-intelligence-council-of-ais.md).
+- Kim, Y. et al. "Towards a Science of Scaling Agent Systems." Google DeepMind (2025) — distilled in [17x Error Trap / bag of agents](knowledge/17x-error-trap-bag-of-agents.md) ("spend on workers, not orchestrator"; topology over quantity).
+- Internal: [RESULTS.md](RESULTS.md), [BASIS.md](BASIS.md), [STATUS.md](STATUS.md) (Gate 1 classifier revision).

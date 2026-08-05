@@ -172,7 +172,7 @@ The [Red Hat AI Quickstart for Ansible log analysis](https://docs.redhat.com/en/
 
 Three of four LLM calls are overhead — the productive work is solution generation. The summarization prompt extracts structured fields from semi-structured log text (a pattern drift's hybrid extraction handles well). The classification prompt maps to 7 categories via keyword matching. The router is a binary decision.
 
-**Drift hybrid optimization target**: Replace stages 2–4 with deterministic rules (regex summarization, keyword classification, rule-based routing). Expected result: **75% LLM call reduction**, 1,000ms latency savings, ~3,000 fewer tokens per log cluster. Add denoise pre-digestion for a further ~65% input token reduction before the remaining LLM call.
+**Drift hybrid optimization target**: Replace stages 2–4 with deterministic rules (regex summarization, keyword classification, rule-based routing). Expected result: **75% LLM call reduction**, 1,000ms latency savings, ~3,000 fewer tokens per log cluster. Add logdigest pre-digestion for a further ~65% input token reduction before the remaining LLM call.
 
 If enterprise safety guards are added to each LLM call (as production deployments require), the overhead compounds: 4 LLM calls × 2 guards each = 8 additional safety checks per cluster. The drift hybrid version reduces this to 1 LLM call × 2 guards = 2 safety checks — a 75% reduction in safety overhead as well.
 
@@ -421,7 +421,7 @@ Input pre-digestion (83% token reduction on Ansible logs) reduces what the safet
 
 This is more than a performance optimization — it's a safety improvement. Large inputs (100KB+ logs) caused the productive LLM to fail 40% of the time (ignoring instructions, producing rambling narratives). Pre-digestion eliminated these failures entirely. A safety layer evaluating the focused pre-digested output is checking higher-quality content and is less likely to false-reject.
 
-**Experiment 19 validated this on OpenShift pod logs.** We ran a realistic noisy pod log (166 lines of `oc logs` output — health checks, leader election renewals, informer sync, managedFields YAML, throttling, TLS noise) through denoise's must-gather pre-digester, then compared raw vs pre-digested triage quality using qwen2.5:32b.
+**Experiment 19 validated this on OpenShift pod logs.** We ran a realistic noisy pod log (166 lines of `oc logs` output — health checks, leader election renewals, informer sync, managedFields YAML, throttling, TLS noise) through logdigest's must-gather pre-digester, then compared raw vs pre-digested triage quality using qwen2.5:32b.
 
 | Metric | Raw | Pre-digested | Delta |
 |--------|-----|-------------|-------|
@@ -561,7 +561,7 @@ The classifier's 81.5% accuracy on this dataset is not a limitation — it refle
 
 For production safety pipelines running 15-365 checks per pipeline run, replacing the LLM guard's content classification with a tiered classifier at content-safe checkpoints eliminates the latency and cost of LLM inference for checks that produce no signal. The LLM guard remains appropriate for genuinely ambiguous content — but on software engineering workloads, that is 0% of outputs at the 0.90 confidence threshold.
 
-**Methodology**: `scripts/probe_guard_logprobs.py` called Llama Guard 3-1B via Ollama with `"logprobs": True, "top_logprobs": 5`, extracting P(safe) and P(unsafe) from the first token's logprob distribution. Entropy calculated as Shannon entropy of the binary distribution. Classifier trained with `scripts/train_guard_classifier.py` using scikit-learn LogisticRegression with 5-fold stratified CV, weights exported to `results/guard_classifier/` for zero-dependency pure-Python inference. Guard runtime module: denoise sibling repo at `../denoise/src/denoise/guard.py` — see denoise's `docs/GUARD.md` for usage and integration docs.
+**Methodology**: `scripts/probe_guard_logprobs.py` called Llama Guard 3-1B via Ollama with `"logprobs": True, "top_logprobs": 5`, extracting P(safe) and P(unsafe) from the first token's logprob distribution. Entropy calculated as Shannon entropy of the binary distribution. Classifier trained with `scripts/train_guard_classifier.py` using scikit-learn LogisticRegression with 5-fold stratified CV, weights exported to `results/guard_classifier/` for zero-dependency pure-Python inference. Guard runtime module: this repo, `src/drift/safety/guard.py` and `src/drift/safety/classifier.py` (moved here from logdigest) — see [docs/GUARD.md](GUARD.md) for usage and integration docs.
 
 ### CodeShield vs Llama Guard: static analysis finds what LLM guards miss (and vice versa)
 

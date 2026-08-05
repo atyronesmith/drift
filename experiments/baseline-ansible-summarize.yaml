@@ -1,0 +1,8 @@
+experiment:
+  name: baseline-ansible-summarize
+  model: qwen2.5:32b
+  temperature: 0
+  task: ansible_summarize
+
+  system_prompt_file: system.md
+  user_prompt_file: user.md

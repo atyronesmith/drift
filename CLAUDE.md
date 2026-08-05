@@ -61,12 +61,12 @@ drift compare <path_a> <path_b>
 - `scripts/safety_audit.py` — Batch audit of saved results against guard models.
 
 ### Tasks
-Each task lives in `tasks/<name>/` with `input.md`, prompt files, and `functional_tests.py`. Tasks: code_review, data_extraction, iterative_refactor, incident_triage, config_generation, promql_generation, metric_summary, alert_triage, pod_log_triage, ansible_classify, ansible_route, ansible_summarize, ansible_triage.
+Each task lives in `tasks/<name>/` with `input.md`, prompt files, and `functional_tests.py`. Tasks: code_review, data_extraction, iterative_refactor, incident_triage, config_generation, promql_generation, metric_summary, alert_triage, pod_log_triage, ansible_classify, ansible_route, ansible_summarize. Multi-log Ansible corpus: `datasets/ansible_triage/{inputs,digested}/` (gitignored).
 
 ## Documentation
 
 - `docs/PAPER.md` — Technical paper for review/outreach
-- `docs/RESULTS.md` — 19 experiments documented
+- `docs/RESULTS.md` — 20 experiments documented
 - `docs/HYBRID.md` — Automated rule extraction pipeline
 - `docs/THEORY.md` — Voting vs deliberation, distillation viability thresholds
 - `docs/PROPOSAL.md` — Management proposal with dollar-cost analysis
@@ -87,7 +87,7 @@ Each task lives in `tasks/<name>/` with `input.md`, prompt files, and `functiona
 
 ## Relationship to logdigest
 
-logdigest (sibling repo at `../denoise`) is the runtime pre-digestion library. Drift trains, experiments, and validates.
+logdigest (sibling repo at `../logdigest`, checked out locally as `../denoise`) is the runtime pre-digestion library. Drift trains, experiments, and validates.
 
 - Drift experiments validate logdigest's pre-digestion effectiveness
 - `drift discover` (planned) will generate pattern sets for logdigest from log corpora

@@ -1,6 +1,7 @@
 results/
 datasets/
 .env
+.DS_Store
 __pycache__/
 .venv/
 *.egg-info/

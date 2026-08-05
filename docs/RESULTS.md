@@ -1277,13 +1277,13 @@ LLM handles remaining 3 fields: `current_status`, `meaning`, `key_insight`.
 
 **Date**: 2026-04-13
 
-**Goal**: Validate the denoise must-gather pre-digester on a pod log triage task — measure token savings, latency reduction, and whether pre-digestion preserves (or improves) LLM output quality.
+**Goal**: Validate the logdigest must-gather pre-digester on a pod log triage task — measure token savings, latency reduction, and whether pre-digestion preserves (or improves) LLM output quality.
 
 ### Setup
 
 - **Task**: `pod_log_triage` — SRE analysis of noisy OpenShift pod logs
 - **Input**: 166-line simulated `oc logs` output with 3 error clusters (OOMKilled/CrashLoopBackOff, GPU memory fragmentation/CUDA OOM, node NotReady/pod eviction) buried in health checks, leader election renewals, informer sync, managedFields YAML, throttling, and TLS noise
-- **Pre-digester**: `denoise.mustgather.predigest()` — line classification, block collapsing, blob truncation
+- **Pre-digester**: `logdigest.mustgather.predigest()` — line classification, block collapsing, blob truncation
 - **Model**: qwen2.5:32b at temperature=0
 - **Runs**: 3 per variant (raw vs pre-digested)
 - **Functional tests**: 13 (8 extractable, 5 reasoning)
@@ -1327,8 +1327,8 @@ The pre-digester collapsed health check lines into `[HEALTH CHECKS: N lines, all
 
 - **Corpus**: 500 failed Ansible job logs from AAP (scrubbed), 20-log validation sample
 - **Baseline**: 3-step LLM pipeline — summarize, classify, route (all qwen2.5:32b, temp=0)
-- **Hybrid**: denoise pre-digestion → LLM summarize → keyword classify → signal-presence route
-- **Pre-digester**: `denoise.ansible.predigest()` — strips ok/skipping/changed lines, retry blocks, item loops, embedded K8s API responses
+- **Hybrid**: logdigest pre-digestion → LLM summarize → keyword classify → signal-presence route
+- **Pre-digester**: `logdigest.ansible.predigest()` — strips ok/skipping/changed lines, retry blocks, item loops, embedded K8s API responses
 - **Classify engine**: 7-category keyword regex with match-count scoring (`engines/ansible_classify.py`)
 - **Route engine**: Signal-presence heuristic — ≥2 positive signals → "No More Context Needed" (`engines/ansible_route.py`)
 - **Model**: qwen2.5:32b at temperature=0

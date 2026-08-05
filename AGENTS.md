@@ -37,7 +37,7 @@ pip install -e ".[classifiers]"
 - **HTTP requests in providers**: Use `subprocess` + `curl`, not Python HTTP libraries. This avoids endpoint security software blocking direct TCP connections from Python processes.
 - **Environment variables**: API keys and URLs come from `.env` (loaded via `python-dotenv`). Never hardcode credentials.
 - **Results directory**: `results/` is gitignored. Experiment outputs go here.
-- **Datasets directory**: `datasets/` is gitignored. Downloaded data goes here.
+- **Datasets directory**: `datasets/` is gitignored. Downloaded data goes here (e.g. `datasets/ansible_triage/inputs/` and `datasets/ansible_triage/digested/` for the Ansible log corpus).
 
 ## Running Tests
 

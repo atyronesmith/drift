@@ -150,7 +150,7 @@ class TieredGuard:
     def check(self, content: str, prompt: str = "") -> GuardResult:
         """Check content safety using tiered classification.
 
-        Tier 1/2 (denoise classifier, <1ms) handles most inputs.
+        Tier 1/2 (drift.safety.classifier, <1ms) handles most inputs.
         Tier 3 (LLM guard) only called on escalation.
 
         Returns:

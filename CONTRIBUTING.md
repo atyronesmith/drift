@@ -99,7 +99,7 @@ Each task needs:
 
 - `.env` files (API keys, credentials)
 - `results/` (experiment outputs — large, machine-specific)
-- `datasets/` (downloaded data files)
+- `datasets/` (downloaded data files — e.g. `datasets/ansible_triage/inputs/` for scrubbed AAP failure logs, `datasets/ansible_triage/digested/` for pre-digested copies)
 - Large binary files
 
 ## Reporting Issues

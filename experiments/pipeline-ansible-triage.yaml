@@ -1,0 +1,33 @@
+experiment:
+  name: pipeline-ansible-triage
+  type: pipeline
+  task: ansible_summarize
+
+  steps:
+    - name: summarize
+      model: qwen2.5:32b
+      temperature: 0
+      system_prompt_file: tasks/ansible_summarize/system.md
+      user_prompt: |
+        Analyze this Ansible job log and produce a structured error summary.
+
+        {input}
+
+    - name: classify
+      model: qwen2.5:32b
+      temperature: 0
+      system_prompt_file: tasks/ansible_classify/system.md
+      user_prompt: |
+        Classify this Ansible error log summary into the appropriate team category.
+
+        {step_summarize}
+
+    - name: route
+      model: qwen2.5:32b
+      temperature: 0
+      system_prompt_file: tasks/ansible_route/system.md
+      user_prompt: |
+        Given this error summary and classification, determine if more context is needed to provide a solution.
+
+        Summary: {step_summarize}
+        Category: {step_classify}

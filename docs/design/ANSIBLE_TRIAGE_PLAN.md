@@ -1,7 +1,7 @@
-# Plan: Drift + Denoise for Ansible Log Analysis Quickstart
+# Plan: Drift + logdigest for Ansible Log Analysis Quickstart
 
 **Target**: [rh-ai-quickstart/ansible-log-analysis](https://github.com/rh-ai-quickstart/ansible-log-analysis)
-**Corpus**: 103 real AAP failed job logs (`data/logs/failed/job_*.txt`), secrets already redacted
+**Corpus**: 500 scrubbed AAP failed job logs in `datasets/ansible_triage/inputs/` (upstream quickstart ships 103 in `data/logs/failed/`)
 **Goal**: Reduce LLM calls from 4 per log cluster to 1, with measurable latency/token savings
 
 ## Background
@@ -27,7 +27,7 @@ The upstream truncates logs to the last 50 characters for embedding (`texts = [s
 - **Routing** is a binary decision (2 possible outputs) with explicit decision criteria that map to log completeness signals.
 - **Solve** is genuine reasoning -- must stay as LLM.
 
-Existing drift tasks `ansible_classify` and `ansible_route` already have system/user prompts adapted from this upstream. This plan extends them into a full pipeline with functional tests, hybrid compilation, and denoise integration.
+Existing drift tasks `ansible_classify` and `ansible_route` already have system/user prompts adapted from this upstream. This plan extends them into a full pipeline with functional tests, hybrid compilation, and logdigest integration.
 
 ---
 
@@ -35,7 +35,7 @@ Existing drift tasks `ansible_classify` and `ansible_route` already have system/
 
 ### Work
 
-1. Copy the 103 log files into `tasks/ansible_triage/inputs/` as a multi-input corpus
+1. Copy log files into `datasets/ansible_triage/inputs/` as a multi-input corpus (pre-digested output in `datasets/ansible_triage/digested/`)
 2. Create three drift tasks mirroring the upstream stages:
    - `ansible_summarize` -- error log in, structured summary out
    - `ansible_classify` -- (exists) update with functional tests
@@ -139,25 +139,26 @@ drift probe experiments/baseline-ansible-route.yaml -o probe-route.json
 
 ---
 
-## Phase 3: Denoise Pre-digestion
+## Phase 3: logdigest Pre-digestion
 
 ### Work
 
-1. Add Ansible log domain to denoise (may already exist from pod_log_triage work)
-2. Run denoise on the 103 raw logs, measure token savings
+1. Add Ansible log domain to logdigest (may already exist from pod_log_triage work)
+2. Run logdigest on the 103 raw logs, measure token savings
 3. Compare LLM summarization quality: raw input vs pre-digested input
 
 ```bash
 # Check if domain exists
-drift-denoise detect-domain data/logs/failed/job_1460308.txt
+drift-logdigest detect-domain datasets/ansible_triage/inputs/job_1460308.txt
 
-# Pre-digest all 103 logs
-for f in tasks/ansible_triage/inputs/*.txt; do
-  drift-denoise predigest "$f" -o "${f%.txt}.digest.txt"
+# Pre-digest all logs (writes to digested/ alongside inputs/)
+mkdir -p datasets/ansible_triage/digested
+for f in datasets/ansible_triage/inputs/*.txt; do
+  drift-logdigest predigest "$f" -o "datasets/ansible_triage/digested/$(basename "$f")"
 done
 
 # Measure savings
-drift-denoise stats tasks/ansible_triage/inputs/
+drift-logdigest stats datasets/ansible_triage/inputs/
 ```
 
 ### Ansible Log Noise Profile
@@ -175,19 +176,19 @@ The actual failure signal is typically 5-20 lines in a log that may be thousands
 
 | Metric | Expected Value | Basis |
 |--------|---------------|-------|
-| Token savings | 75-85% | Comparable to denoise's 83% on 500 Ansible logs |
+| Token savings | 75-85% | Comparable to logdigest's 83% on 500 Ansible logs |
 | Quality delta | +5-10% functional accuracy | Pre-digestion removes noise that confuses summarization |
 | Truncation elimination | 100% | Pre-digested logs fit without truncation |
 
 ### Deliverables
 - Token savings report (per-log and aggregate)
 - Side-by-side quality comparison on 20 representative logs
-- Denoise domain config for Ansible AAP logs (if not already present)
+- logdigest domain config for Ansible AAP logs (if not already present)
 
 ### Success Criteria
 - Token savings > 70%
 - Functional test pass rate equal or better with pre-digested input
-- No information loss for any of the 103 failure signals
+- No information loss for failure signals in the validation sample
 
 ---
 
@@ -206,8 +207,8 @@ drift compile hybrid-classify.yaml --prompt tasks/ansible_classify/user.md -o en
 drift compile hybrid-route.yaml --prompt tasks/ansible_route/user.md -o engines/ansible_route.py
 
 # Validate against corpus
-drift validate engines/ansible_classify.py --input-dir tasks/ansible_triage/inputs/
-drift validate engines/ansible_route.py --input-dir tasks/ansible_triage/inputs/
+drift validate engines/ansible_classify.py --input-dir datasets/ansible_triage/inputs/
+drift validate engines/ansible_route.py --input-dir datasets/ansible_triage/inputs/
 ```
 
 ### Hybrid Strategy Per Stage
@@ -247,11 +248,11 @@ drift validate engines/ansible_route.py --input-dir tasks/ansible_triage/inputs/
 ### Deliverables
 - Hybrid YAML configs for classify and route
 - Compiled engines (`engines/ansible_classify.py`, `engines/ansible_route.py`)
-- Validation report: extraction rate on all 103 logs
+- Validation report: extraction rate on all logs in `datasets/ansible_triage/inputs/`
 - Accuracy comparison: hybrid vs LLM baseline
 
 ### Success Criteria
-- Classification: 100% accuracy on 103 logs (keyword rules cover all categories)
+- Classification: 100% accuracy on validation sample (keyword rules cover all categories)
 - Route: >= 95% agreement with LLM baseline
 - Summarize hybrid: error type extraction >= 90% accuracy
 - Combined latency reduction >= 70%
@@ -314,15 +315,16 @@ The key finding: drift's hybrid optimization doesn't just save LLM compute -- it
 
 ### Work
 
-1. Package `ansible_triage` as a complete drift example with:
-   - Task definitions, functional tests, experiment configs
+1. Package the Ansible triage example with:
+   - Task definitions in `tasks/ansible_{summarize,classify,route}/`, functional tests, experiment configs
+   - Corpus in `datasets/ansible_triage/{inputs,digested}/` (gitignored; obtain locally)
    - Hybrid engines, validation results
    - Before/after metrics
 
 2. Propose upstream PR to `rh-ai-quickstart/ansible-log-analysis`:
    - Add `--hybrid` flag to the pipeline
    - Rules engine replaces classify and route nodes
-   - Denoise pre-digestion as optional preprocessing
+   - logdigest pre-digestion as optional preprocessing
    - Fall back to LLM for logs where rules don't match (confidence threshold)
 
 3. Update `safety-tax` visualizer:
@@ -337,15 +339,15 @@ ansible-log-analysis/
     classify_rules.py    # compiled from drift
     route_rules.py       # compiled from drift
     summarize_rules.py   # error type extraction only
-  src/alm/denoise/
-    ansible_predigest.py # denoise integration
+  src/alm/logdigest/
+    ansible_predigest.py # logdigest integration
   src/alm/agents/
     node.py              # modified: hybrid path for classify/route
     graph.py             # modified: conditional hybrid nodes
 ```
 
 ### Deliverables
-- Complete drift example in `tasks/ansible_triage/`
+- Task definitions in `tasks/ansible_{summarize,classify,route}/`; corpus in `datasets/ansible_triage/`
 - PR to upstream repo with hybrid option
 - Updated safety-tax visualization
 - Entry in `docs/RESULTS.md` as a new experiment
@@ -353,7 +355,7 @@ ansible-log-analysis/
 ### Success Criteria
 - Upstream PR is reviewable and self-contained
 - Hybrid mode is opt-in (existing behavior unchanged by default)
-- All 103 logs produce equivalent results in hybrid mode
+- All validation logs produce equivalent results in hybrid mode
 
 ---
 
@@ -363,7 +365,7 @@ ansible-log-analysis/
 |-------|--------|-------------|
 | Phase 1: Task Setup | 1 day | None |
 | Phase 2: Baseline | 1 day | Phase 1 |
-| Phase 3: Denoise | 1 day | Phase 1 (parallel with Phase 2) |
+| Phase 3: logdigest | 1 day | Phase 1 (parallel with Phase 2) |
 | Phase 4: Hybrid | 2 days | Phase 2 |
 | Phase 5: Safety Guards | 0.5 day | Phase 4 |
 | Phase 6: Integration | 1.5 days | Phase 4, Phase 5 |
@@ -375,5 +377,5 @@ ansible-log-analysis/
 |------|-----------|------------|
 | Classification rules miss edge cases | Low | The upstream prompt already documents keyword matching; 8 categories are well-separated |
 | Route heuristic disagrees with LLM on ambiguous cases | Medium | Accept 95% threshold; ambiguous cases fall through to LLM |
-| Denoise strips failure signal from logs | Low | Validate all 103 failure signals preserved; denoise is conservative by design |
+| logdigest strips failure signal from logs | Low | Validate failure signals preserved in `datasets/ansible_triage/inputs/`; logdigest is conservative by design |
 | Upstream repo changes pipeline structure | Low | Pin to specific commit; plan works with current LangGraph architecture |
