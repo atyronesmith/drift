@@ -29,6 +29,12 @@ source .venv/bin/activate
 pip install -e ".[classifiers]"
 ```
 
+Some scripts (e.g. `scripts/podlog_predigest_measure.py`) import the sibling [logdigest](https://github.com/atyronesmith/logdigest) repo. Clone it alongside drift:
+
+```bash
+git clone https://github.com/atyronesmith/logdigest.git ../logdigest
+```
+
 ## Key Conventions
 
 - **Python 3.11+** required

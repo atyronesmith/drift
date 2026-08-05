@@ -12,6 +12,12 @@ pip install -e ".[classifiers]"
 
 Copy `.env.example` to `.env` and configure your provider settings.
 
+Some experiment scripts import the sibling [logdigest](https://github.com/atyronesmith/logdigest) repo for pre-digestion. Clone it next to drift:
+
+```bash
+git clone https://github.com/atyronesmith/logdigest.git ../logdigest
+```
+
 ## Development
 
 ### Project Structure

@@ -22,8 +22,8 @@ import tempfile
 import time
 from pathlib import Path
 
-# Add logdigest to path (checkout directory is still named "denoise" locally)
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "denoise" / "src"))
+# Add sibling logdigest repo to path (expected at ../logdigest)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "logdigest" / "src"))
 from logdigest.mustgather import predigest
 
 OLLAMA_MODEL = "qwen2.5:32b"

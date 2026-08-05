@@ -87,7 +87,7 @@ Each task lives in `tasks/<name>/` with `input.md`, prompt files, and `functiona
 
 ## Relationship to logdigest
 
-logdigest (sibling repo at `../logdigest`, checked out locally as `../denoise`) is the runtime pre-digestion library. Drift trains, experiments, and validates.
+logdigest (sibling repo at `../logdigest`) is the runtime pre-digestion library. Drift trains, experiments, and validates.
 
 - Drift experiments validate logdigest's pre-digestion effectiveness
 - `drift discover` (planned) will generate pattern sets for logdigest from log corpora

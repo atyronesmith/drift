@@ -39,7 +39,7 @@ def process(input_text: str, llm=None) -> dict:
     result = {}
 
     # --- Tier 1: Deterministic extraction (< 1ms) ---
-    _set(result, 'requests_running', _extract(r'in\ namespace\ m\s*(\d+)\s*$', input_text))
+    _set(result, 'requests_running', _extract(r'in\ namespace\ demo-ns\s*(\d+)\s*$', input_text))
     _set(result, 'requests_waiting', _extract(r'vllm:num_requests_running\{namespace="demo-ns",\ model_name="meta\-llama/Llama\-3\.1\-8B\-Instruct"\}:\ 3\.\s*(\d+)\s*$', input_text))
     _set(result, 'p95_latency_seconds', _extract(r'sum\(rate\(vllm:e2e_request_latency_seconds_bucket\{namespace="demo-ns"\}\[5m\]\)\)\ by\ \(le\)\):\s*(\d+\.\d+)\s*$', input_text))
     _set(result, 'gpu_utilization_percent', _extract(r'avg\(DCGM_FI_DEV_GPU_UTIL\):\s*(\d+\.\d+)\s*$', input_text))
